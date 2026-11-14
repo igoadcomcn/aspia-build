@@ -1,8 +1,8 @@
 diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
-index 70fdc16..8c28e1c 100644
+index 70fdc16..24ec166 100644
 --- a/source/client/desktop/main_window.cc
 +++ b/source/client/desktop/main_window.cc
-@@ -18,9 +18,13 @@
+@@ -18,20 +18,34 @@
  
  #include "client/desktop/main_window.h"
  
@@ -15,8 +15,14 @@ index 70fdc16..8c28e1c 100644
 +#include <QLabel>
  #include <QLineEdit>
  #include <QMenu>
++#include <QMouseEvent>
  #include <QScreen>
-@@ -32,6 +36,14 @@
+ #include <QShortcut>
+ #include <QSignalBlocker>
+ #include <QStyle>
+ #include <QTabBar>
++#include <QTimer>
+ #include <QToolButton>
  #include <QUrl>
  #include <QWindow>
  
@@ -31,7 +37,15 @@ index 70fdc16..8c28e1c 100644
  #include "base/auto_qpointer.h"
  #include "base/gui_application.h"
  #include "base/logging.h"
-@@ -75,6 +87,12 @@ constexpr int kSearchFieldMarginPx = 5;
+@@ -41,7 +55,6 @@
+ #include "client/database.h"
+ #include "client/settings.h"
+ #include "client/system_settings.h"
+-#include "client/desktop/app_lock.h"
+ #include "client/desktop/authorization_dialog.h"
+ #include "client/desktop/client_tab.h"
+ #include "client/desktop/credentials_tab.h"
+@@ -75,6 +88,12 @@ constexpr int kSearchFieldMarginPx = 5;
  // Custom build: size of the "+" button that sits in the top-right corner of the tab bar.
  constexpr int kAddButtonSizePx = 22;
  
@@ -44,7 +58,7 @@ index 70fdc16..8c28e1c 100644
  // Custom build: localized UI strings of this file are written as UTF-16 escapes. MSVC assumes
  // the ANSI code page for sources without a BOM, so plain Chinese text in a UTF-8 file would come
  // out as mojibake on a build machine whose code page is not 65001.
-@@ -163,7 +181,7 @@ MainWindow::MainWindow(QWidget* parent)
+@@ -163,7 +182,7 @@ MainWindow::MainWindow(QWidget* parent)
  
      QMenu* hosts_menu = new QMenu(add_button);
      add_button->setMenu(hosts_menu);
@@ -53,10 +67,15 @@ index 70fdc16..8c28e1c 100644
  
      connect(hosts_menu, &QMenu::aboutToShow, this, [this, hosts_menu]()
      {
-@@ -231,6 +249,14 @@ MainWindow::MainWindow(QWidget* parent)
+@@ -231,6 +250,19 @@ MainWindow::MainWindow(QWidget* parent)
      ui->action_sessions_in_tabs->setChecked(true);
      ui->action_sessions_in_tabs->setVisible(false);
  
++    // Custom build: application locking is not used, so the command is taken out of the menus
++    // (it is also not connected to anything anymore).
++    ui->action_lock->setVisible(false);
++    ui->action_lock->setShortcut(QKeySequence());
++
 +    // Custom build: the menu bar and the main toolbar belong to the host list only. As soon as a
 +    // remote session has focus they are hidden (see updateMainChrome()), so the session picture
 +    // fills the window and the session's own floating toolbar is used to operate it.
@@ -68,7 +87,15 @@ index 70fdc16..8c28e1c 100644
      const bool always_on_top = settings.alwaysOnTop();
      ui->action_always_on_top->setChecked(always_on_top);
      setWindowFlag(Qt::WindowStaysOnTopHint, always_on_top);
-@@ -317,12 +343,22 @@ MainWindow::MainWindow(QWidget* parent)
+@@ -242,7 +274,6 @@ MainWindow::MainWindow(QWidget* parent)
+     connect(ui->action_mcp_connector, &QAction::toggled, this, &MainWindow::onMcpConnector);
+     connect(ui->action_help, &QAction::triggered, this, &MainWindow::onHelp);
+     connect(ui->action_about, &QAction::triggered, this, &MainWindow::onAbout);
+-    connect(ui->action_lock, &QAction::triggered, this, &MainWindow::onLock);
+     connect(ui->action_exit, &QAction::triggered, this, &MainWindow::close);
+     connect(ui->toolbar, &QToolBar::visibilityChanged, ui->action_toolbar, &QAction::setChecked);
+     connect(ui->action_toolbar, &QAction::toggled, ui->toolbar, &QToolBar::setVisible);
+@@ -317,12 +348,18 @@ MainWindow::MainWindow(QWidget* parent)
      ui->menu_session_type->menuAction()->setVisible(false);
      ui->menu_action->menuAction()->setVisible(false);
  
@@ -85,15 +112,59 @@ index 70fdc16..8c28e1c 100644
 +    });
 +    addTab(management_tab, tr("Management"), QIcon(":/img/cms.svg"));
  
-     app_lock_ = new AppLock(this);
-     connect(app_lock_, &AppLock::sig_lockRequested, this, &MainWindow::onLockRequested);
-     app_lock_->setTimeout(Database::instance().lockTimeout());
-+
+-    app_lock_ = new AppLock(this);
+-    connect(app_lock_, &AppLock::sig_lockRequested, this, &MainWindow::onLockRequested);
+-    app_lock_->setTimeout(Database::instance().lockTimeout());
 +    updateMainChrome();
  }
  
  //--------------------------------------------------------------------------------------------------
-@@ -650,6 +686,7 @@ void MainWindow::onCurrentTabChanged(int index)
+@@ -568,11 +605,6 @@ void MainWindow::onSettings()
+ 
+     SettingsTab* settings_tab = new SettingsTab(this);
+ 
+-    connect(settings_tab, &SettingsTab::sig_lockTimeoutChanged, this, [this]()
+-    {
+-        app_lock_->setTimeout(Database::instance().lockTimeout());
+-    });
+-
+     connect(settings_tab, &SettingsTab::sig_desktopConfigChanged, this, [this]()
+     {
+         for (int i = 0; i < ui->tabs->count(); ++i)
+@@ -589,26 +621,6 @@ void MainWindow::onSettings()
+     addTab(settings_tab, tr("Settings"), QIcon(":/img/settings.svg"));
+ }
+ 
+-//--------------------------------------------------------------------------------------------------
+-void MainWindow::onLock()
+-{
+-    LOG(INFO) << "[ACTION] Lock clicked";
+-
+-    if (hasSessions())
+-    {
+-        MsgBox::information(this, tr("Close all sessions to lock the application."));
+-        return;
+-    }
+-
+-    if (AppLock::hasOpenDialogs())
+-    {
+-        MsgBox::information(this, tr("Close all dialogs to lock the application."));
+-        return;
+-    }
+-
+-    onLockRequested();
+-}
+-
+ //--------------------------------------------------------------------------------------------------
+ void MainWindow::onHelp()
+ {
+@@ -644,12 +656,12 @@ void MainWindow::onCurrentTabChanged(int index)
+     const bool is_session = tab->tabType() == Tab::Type::SESSION;
+     ui->action_help->setShortcut(is_session ? QKeySequence() : QKeySequence(Qt::Key_F1));
+     ui->action_quick_connect->setShortcut(is_session ? QKeySequence() : QKeySequence(Qt::Key_F8));
+-    ui->action_lock->setShortcut(is_session ? QKeySequence() : QKeySequence(Qt::CTRL | Qt::Key_L));
+ 
+     active_tab_ = tab;
      installTabActions(active_tab_);
      active_tab_->activate();
      syncSearchField();
@@ -101,7 +172,23 @@ index 70fdc16..8c28e1c 100644
  }
  
  //--------------------------------------------------------------------------------------------------
-@@ -1263,6 +1300,262 @@ void MainWindow::syncSearchField()
+@@ -1033,15 +1045,6 @@ void MainWindow::onMcpClientsChanged(const QStringList& clients)
+     setWindowTitle(tr("%1 - AI is connected").arg(window_title_));
+ }
+ 
+-//--------------------------------------------------------------------------------------------------
+-void MainWindow::onLockRequested()
+-{
+-    LOG(INFO) << "Lock requested";
+-
+-    saveWindowState();
+-    emit sig_lockRequested();
+-}
+-
+ //--------------------------------------------------------------------------------------------------
+ void MainWindow::saveWindowState()
+ {
+@@ -1263,6 +1266,298 @@ void MainWindow::syncSearchField()
      }
  }
  
@@ -139,12 +226,19 @@ index 70fdc16..8c28e1c 100644
 +    caption_widget_ = new QWidget(ui->tabs);
 +    caption_widget_->setObjectName(QStringLiteral("captionWidget"));
 +
++    // Custom build: the caption is dragged with startSystemMove() instead of the native
++    // HTCAPTION hit test. The hit test made the whole caption row swallow its clicks as soon as
++    // the window was restored from the maximized state, which left the window buttons dead.
++    caption_widget_->installEventFilter(this);
++    ui->tabs->tabBar()->installEventFilter(this);
++
 +    QBoxLayout* caption_layout = new QBoxLayout(QBoxLayout::LeftToRight, caption_widget_);
 +    caption_layout->setContentsMargins(8, 2, 0, 2);
 +    caption_layout->setSpacing(2);
 +
 +    caption_label_ = new QLabel(windowTitle(), caption_widget_);
 +    caption_label_->setObjectName(QStringLiteral("captionLabel"));
++    caption_label_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 +    {
 +        QFont font = caption_label_->font();
 +        font.setBold(true);
@@ -191,32 +285,61 @@ index 70fdc16..8c28e1c 100644
 +//--------------------------------------------------------------------------------------------------
 +void MainWindow::onMaximizeClicked()
 +{
-+    if (isMaximized())
-+        showNormal();
-+    else
-+        showMaximized();
++    // The state is changed from a queued call: doing it inside the click handler of the button
++    // (while the click still holds the mouse) disrupts the mouse capture on Windows and the
++    // window buttons stop reacting.
++    QTimer::singleShot(0, this, [this]()
++    {
++        if (isMaximized())
++            showNormal();
++        else
++            showMaximized();
++    });
 +}
 +
 +//--------------------------------------------------------------------------------------------------
-+bool MainWindow::isCaptionPosition(const QPoint& pos) const
++void MainWindow::startWindowDrag()
 +{
-+    QWidget* widget = childAt(pos);
-+    if (!widget)
-+        return false;
++    // The window is frameless, so the caption drag is started explicitly. Returning HTCAPTION
++    // from the native hit test would make the caption swallow every click, including the ones
++    // that belong to the window buttons.
++    if (isFullScreen())
++        return;
 +
-+    // The window buttons and the "+" button must stay clickable, so they never count as caption.
-+    if (qobject_cast<QAbstractButton*>(widget))
-+        return false;
-+
-+    if (caption_widget_ && (widget == caption_widget_ || caption_widget_->isAncestorOf(widget)))
-+        return true;
-+
-+    // The empty part of the tab strip can be used to drag the window as well.
-+    QTabBar* tab_bar = ui->tabs->tabBar();
-+    const QPoint bar_pos = tab_bar->mapFrom(this, pos);
-+    return tab_bar->rect().contains(bar_pos) && tab_bar->tabAt(bar_pos) == -1;
++    if (QWindow* handle = windowHandle())
++        handle->startSystemMove();
 +}
 +
++//--------------------------------------------------------------------------------------------------
++bool MainWindow::eventFilter(QObject* object, QEvent* event)
++{
++    if (object != caption_widget_ && object != ui->tabs->tabBar())
++        return QMainWindow::eventFilter(object, event);
++
++    const QEvent::Type type = event->type();
++    if (type != QEvent::MouseButtonPress && type != QEvent::MouseButtonDblClick)
++        return QMainWindow::eventFilter(object, event);
++
++    QMouseEvent* mouse_event = static_cast<QMouseEvent*>(event);
++    if (mouse_event->button() != Qt::LeftButton)
++        return QMainWindow::eventFilter(object, event);
++
++    // Presses on a tab stay with the tab bar (selection, detaching, drag & drop).
++    if (object == ui->tabs->tabBar() &&
++        ui->tabs->tabBar()->tabAt(mouse_event->position().toPoint()) != -1)
++    {
++        return QMainWindow::eventFilter(object, event);
++    }
++
++    if (type == QEvent::MouseButtonDblClick)
++    {
++        onMaximizeClicked();
++        return true;
++    }
++
++    startWindowDrag();
++    return true;
++}
 +//--------------------------------------------------------------------------------------------------
 +bool MainWindow::nativeEvent(const QByteArray& event_type, void* message, qintptr* result)
 +{
@@ -251,8 +374,14 @@ index 70fdc16..8c28e1c 100644
 +            const QPoint pos = mapFromGlobal(global_pos);
 +            const QRect client_rect = rect();
 +
++            // The window buttons sit right at the top edge; the resize border must not steal
++            // their clicks.
++            const QWidget* corner = ui->tabs->cornerWidget(Qt::TopRightCorner);
++            const bool over_corner = corner && corner->isVisible() &&
++                corner->rect().contains(corner->mapFrom(this, pos));
++
 +            // A frameless window has no native border, so the resize edges are hit-tested here.
-+            if (!isMaximized() && !isFullScreen())
++            if (!isMaximized() && !isFullScreen() && !over_corner)
 +            {
 +                const bool on_left = pos.x() < kResizeBorderPx;
 +                const bool on_right = pos.x() >= client_rect.width() - kResizeBorderPx;
@@ -281,12 +410,6 @@ index 70fdc16..8c28e1c 100644
 +                }
 +            }
 +
-+            // Caption area: native dragging, double-click to maximize and Aero snap keep working.
-+            if (!isFullScreen() && isCaptionPosition(pos))
-+            {
-+                *result = HTCAPTION;
-+                return true;
-+            }
 +        }
 +    }
 +#endif
@@ -365,10 +488,16 @@ index 70fdc16..8c28e1c 100644
  void MainWindow::installTabActions(Tab* tab)
  {
 diff --git a/source/client/desktop/main_window.h b/source/client/desktop/main_window.h
-index 1803e64..0b6ad09 100644
+index 1803e64..7f93882 100644
 --- a/source/client/desktop/main_window.h
 +++ b/source/client/desktop/main_window.h
-@@ -42,6 +42,8 @@ class Tab;
+@@ -36,12 +36,13 @@ namespace proto::peer {
+ enum SessionType : int;
+ } // namespace proto::peer
+ 
+-class AppLock;
+ class ClientWindow;
+ class Tab;
  class ManagementTab;
  class SearchDialog;
  class QLineEdit;
@@ -377,19 +506,45 @@ index 1803e64..0b6ad09 100644
  class HostConfig;
  
  class MainWindow final
-@@ -66,6 +68,11 @@ signals:
+@@ -59,13 +60,17 @@ public:
+ public slots:
+     void showAndActivate();
+ 
+-signals:
+-    // The state of the window is saved by then, and the window is expected to be destroyed.
+-    void sig_lockRequested();
+-
  protected:
      // QMainWindow implementation.
      void closeEvent(QCloseEvent* event) final;
 +    void changeEvent(QEvent* event) final;
 +
-+    // QWidget implementation. The window is frameless, so the native hit test decides where the
-+    // window can be dragged and resized.
++    // QObject implementation. Used to drag the window from its caption.
++    bool eventFilter(QObject* object, QEvent* event) final;
++
++    // QWidget implementation. The window is frameless, so the native hit test provides the resize
++    // edges; the caption is dragged separately (see eventFilter()).
 +    bool nativeEvent(const QByteArray& event_type, void* message, qintptr* result) final;
  
      // McpController::MainWindow implementation.
      QList<McpController::ClientInfo> mcpClients() const final;
-@@ -122,6 +129,18 @@ private:
+@@ -86,7 +91,6 @@ private slots:
+     void onQuickConnect();
+     void onCredentials();
+     void onSettings();
+-    void onLock();
+     void onHelp();
+     void onAbout();
+     void onCurrentTabChanged(int index);
+@@ -103,7 +107,6 @@ private slots:
+     void onAlwaysOnTop(bool checked);
+     void onMcpConnector(bool enable);
+     void onMcpClientsChanged(const QStringList& clients);
+-    void onLockRequested();
+ 
+ private:
+     void saveWindowState();
+@@ -122,13 +125,27 @@ private:
      void updateSeparatorVisibility();
      QMenu* menuForActionGroup(Tab::ActionRole group) const;
  
@@ -400,7 +555,7 @@ index 1803e64..0b6ad09 100644
 +    // top-right corner of the tab strip.
 +    void createWindowCaption(QToolButton* add_button);
 +    void onMaximizeClicked();
-+    bool isCaptionPosition(const QPoint& pos) const;
++    void startWindowDrag();
 +
 +    // Custom build: the menus of the host list moved into a context menu.
 +    void onGlobalContextMenu(const QPoint& global_pos);
@@ -408,9 +563,9 @@ index 1803e64..0b6ad09 100644
      std::unique_ptr<Ui::MainWindow> ui;
  
      QLineEdit* search_field_ = nullptr;
-@@ -129,6 +148,9 @@ private:
+     QAction* search_action_ = nullptr;
      SearchDialog* search_dialog_ = nullptr;
-     AppLock* app_lock_ = nullptr;
+-    AppLock* app_lock_ = nullptr;
      Tab* active_tab_ = nullptr;
 +    QWidget* caption_widget_ = nullptr;
 +    QLabel* caption_label_ = nullptr;
