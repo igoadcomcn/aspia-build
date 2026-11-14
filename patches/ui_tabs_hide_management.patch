@@ -1,0 +1,57 @@
+diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
+index cc38a9e..d1e0b19 100644
+--- a/source/client/desktop/main_window.cc
++++ b/source/client/desktop/main_window.cc
+@@ -584,6 +584,28 @@ void MainWindow::onCloseTab(int index)
+ 
+     ui->tabs->removeTab(index);
+     delete tab;
++
++    // Custom build: when the last session is gone, bring the address book back.
++    bool has_session = false;
++    for (int i = 0; i < ui->tabs->count(); ++i)
++    {
++        Tab* remaining = tabAt(i);
++        if (remaining && remaining->tabType() == Tab::Type::SESSION)
++        {
++            has_session = true;
++            break;
++        }
++    }
++
++    if (!has_session)
++    {
++        if (ManagementTab* management_tab = managementTab())
++        {
++            int management_index = ui->tabs->indexOf(management_tab);
++            ui->tabs->tabBar()->setTabVisible(management_index, true);
++            ui->tabs->setCurrentIndex(management_index);
++        }
++    }
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -695,7 +717,8 @@ void MainWindow::onConnect(const HostConfig& host, proto::peer::SessionType sess
+         return;
+ 
+     QString display_name = Database::instance().displayName();
+-    QString computer_name = host.name().isEmpty() ? host.address() : host.name();
++    // Custom build: always show the address (IP) in the tab title.
++    QString computer_name = host.address();
+     QIcon icon = sessionIcon(session_type);
+ 
+     client_window->setWindowIcon(icon);
+@@ -982,6 +1005,13 @@ void MainWindow::addTab(Tab* tab, const QString& title, const QIcon& icon)
+         }
+     });
+ 
++    // Custom build: hide the address-book ("waiting") tab while a session exists.
++    if (tab->tabType() == Tab::Type::SESSION)
++    {
++        if (ManagementTab* management_tab = managementTab())
++            ui->tabs->tabBar()->setTabVisible(ui->tabs->indexOf(management_tab), false);
++    }
++
+     ui->tabs->setCurrentIndex(index);
+ }
+ 
