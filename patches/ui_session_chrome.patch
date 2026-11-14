@@ -1,5 +1,5 @@
 diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
-index 70fdc16..3417cdd 100644
+index 70fdc16..25be133 100644
 --- a/source/client/desktop/main_window.cc
 +++ b/source/client/desktop/main_window.cc
 @@ -18,6 +18,7 @@
@@ -42,20 +42,31 @@ index 70fdc16..3417cdd 100644
  }
  
  //--------------------------------------------------------------------------------------------------
-@@ -1263,6 +1275,18 @@ void MainWindow::syncSearchField()
+@@ -1263,6 +1275,29 @@ void MainWindow::syncSearchField()
      }
  }
  
 +//--------------------------------------------------------------------------------------------------
 +void MainWindow::updateMainChrome()
 +{
-+    // Custom build: the menu bar and the toolbar are only needed outside of a remote session
-+    // (host list: settings, credentials, quick connect, add/edit host). A session takes the whole
-+    // window and is operated through its own floating toolbar instead.
++    // Custom build: no menu bar while a session is in front - the picture gets the whole window.
++    // A desktop session brings its own floating toolbar (revealed at the top edge), so the window
++    // toolbar goes away as well. Terminal / file transfer / system info have no toolbar of their
++    // own, so they keep the window toolbar - otherwise they would be left without any actions.
 +    const bool is_session = active_tab_ && active_tab_->tabType() == Tab::Type::SESSION;
 +
++    bool has_own_toolbar = false;
++    if (is_session)
++    {
++        if (ClientTab* client_tab = dynamic_cast<ClientTab*>(active_tab_))
++        {
++            ClientWindow* window = client_tab->clientWindow();
++            has_own_toolbar = window && window->sessionType() == proto::peer::SESSION_TYPE_DESKTOP;
++        }
++    }
++
 +    ui->menubar->setVisible(!is_session);
-+    ui->toolbar->setVisible(!is_session);
++    ui->toolbar->setVisible(!has_own_toolbar);
 +}
 +
  //--------------------------------------------------------------------------------------------------
