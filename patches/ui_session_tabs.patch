@@ -1,0 +1,145 @@
+diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
+index 1b1f5ba..70fdc16 100644
+--- a/source/client/desktop/main_window.cc
++++ b/source/client/desktop/main_window.cc
+@@ -20,6 +20,7 @@
+ 
+ #include <QCloseEvent>
+ #include <QDesktopServices>
++#include <QFont>
+ #include <QLineEdit>
+ #include <QMenu>
+ #include <QScreen>
+@@ -71,6 +72,17 @@ namespace {
+ // The search field is the last thing on the toolbar and ends up against its edge.
+ constexpr int kSearchFieldMarginPx = 5;
+ 
++// Custom build: size of the "+" button that sits in the top-right corner of the tab bar.
++constexpr int kAddButtonSizePx = 22;
++
++// Custom build: localized UI strings of this file are written as UTF-16 escapes. MSVC assumes
++// the ANSI code page for sources without a BOM, so plain Chinese text in a UTF-8 file would come
++// out as mojibake on a build machine whose code page is not 65001.
++QString uiString(const char16_t* text)
++{
++    return QString::fromUtf16(text);
++}
++
+ //--------------------------------------------------------------------------------------------------
+ QString escapeTabTitle(const QString& title)
+ {
+@@ -131,19 +143,27 @@ MainWindow::MainWindow(QWidget* parent)
+     margin->setFixedWidth(kSearchFieldMarginPx);
+     ui->toolbar->addWidget(margin);
+ 
+-    // Custom build: a fixed "+" button at the far right of the toolbar. Unlike the actions
+-    // injected by installTabActions(), a plain widget survives removeTabActions(), so it stays
+-    // next to the window buttons no matter which tab is active.
++    // Custom build: a "+" button at the far right of the tab bar (corner widget). It drops down
++    // the list of saved hosts; clicking an entry opens a new session tab. A corner widget is used
++    // instead of a toolbar action because the toolbar is repopulated for every active tab.
+     QToolButton* add_button = new QToolButton(this);
+     add_button->setText(QStringLiteral("+"));
+-    add_button->setToolTip(tr("Connect to a saved host"));
++    add_button->setToolTip(uiString(u"\u65B0\u5EFA\u8FDE\u63A5\uFF1A\u9009\u62E9\u5BA2\u6237\u7AEF\u540E\u6253\u5F00\u65B0\u7684\u4F1A\u8BDD\u6807\u7B7E\u9875"));
+     add_button->setAutoRaise(true);
+     add_button->setPopupMode(QToolButton::InstantPopup);
+     add_button->setToolButtonStyle(Qt::ToolButtonTextOnly);
++    add_button->setCursor(Qt::PointingHandCursor);
++    add_button->setFixedSize(kAddButtonSizePx, kAddButtonSizePx);
++    {
++        QFont font = add_button->font();
++        font.setPointSize(font.pointSize() + 2);
++        font.setBold(true);
++        add_button->setFont(font);
++    }
+ 
+     QMenu* hosts_menu = new QMenu(add_button);
+     add_button->setMenu(hosts_menu);
+-    ui->toolbar->addWidget(add_button);
++    ui->tabs->setCornerWidget(add_button, Qt::TopRightCorner);
+ 
+     connect(hosts_menu, &QMenu::aboutToShow, this, [this, hosts_menu]()
+     {
+@@ -152,13 +172,13 @@ MainWindow::MainWindow(QWidget* parent)
+         QList<LocalHostConfig> hosts;
+         if (Database::instance().allLocalHosts(&hosts) == Database::ReadResult::FAILED)
+         {
+-            hosts_menu->addAction(tr("Unable to read the host list"))->setEnabled(false);
++            hosts_menu->addAction(uiString(u"\u65E0\u6CD5\u8BFB\u53D6\u5BA2\u6237\u7AEF\u5217\u8868"))->setEnabled(false);
+             return;
+         }
+ 
+         if (hosts.isEmpty())
+         {
+-            hosts_menu->addAction(tr("No saved hosts"))->setEnabled(false);
++            hosts_menu->addAction(uiString(u"\u8FD8\u6CA1\u6709\u5BA2\u6237\u7AEF\uFF0C\u8BF7\u5148\u5728\u201C\u7BA1\u7406\u201D\u4E2D\u6DFB\u52A0"))->setEnabled(false);
+         }
+         else
+         {
+@@ -179,7 +199,7 @@ MainWindow::MainWindow(QWidget* parent)
+         }
+ 
+         hosts_menu->addSeparator();
+-        hosts_menu->addAction(tr("Manage hosts..."), this, [this]()
++        hosts_menu->addAction(uiString(u"\u7BA1\u7406\u5BA2\u6237\u7AEF\u2026"), this, [this]()
+         {
+             if (ManagementTab* management_tab = managementTab())
+             {
+@@ -206,7 +226,10 @@ MainWindow::MainWindow(QWidget* parent)
+     ui->toolbar->setIconSize(large_icons ? QSize(32, 32) : QSize(24, 24));
+     ui->action_large_icons->setChecked(large_icons);
+ 
+-    ui->action_sessions_in_tabs->setChecked(settings.openSessionsInTabs());
++    // Custom build: sessions are always tabbed, so the option has no effect anymore. Keep it
++    // checked (saveWindowState() writes it back) but take it out of the View menu.
++    ui->action_sessions_in_tabs->setChecked(true);
++    ui->action_sessions_in_tabs->setVisible(false);
+ 
+     const bool always_on_top = settings.alwaysOnTop();
+     ui->action_always_on_top->setChecked(always_on_top);
+@@ -725,12 +748,10 @@ void MainWindow::onConnect(const HostConfig& host, proto::peer::SessionType sess
+         return;
+     }
+ 
+-    // For sessions launched from another session (e.g. file transfer started from a desktop
+-    // session), inherit the tabbed/detached mode of the parent tab. Otherwise (ManagementTab or
+-    // direct call) fall back to the global "open sessions in tabs" setting.
+-    Tab* parent_tab = qobject_cast<Tab*>(sender());
+-    bool detached = (parent_tab && parent_tab->tabType() == Tab::Type::SESSION) ?
+-        parent_tab->isDetached() : !ui->action_sessions_in_tabs->isChecked();
++    // Custom build: sessions always open as tabs inside the main window. Dragging a tab out of
++    // the bar still detaches it into a separate window, so nothing is lost by ignoring the
++    // "open sessions in tabs" option here.
++    const bool detached = false;
+ 
+     ClientWindow* client_window = nullptr;
+ 
+@@ -784,7 +805,17 @@ void MainWindow::onConnect(const HostConfig& host, proto::peer::SessionType sess
+         return;
+ 
+     QString display_name = Database::instance().displayName();
+-    QString computer_name = host.name().isEmpty() ? host.address() : host.name();
++
++    // Custom build: the tab shows "name (address) / session type", so several sessions to the
++    // same computer (desktop / terminal / file transfer) stay tellable apart in the tab bar.
++    QString host_label = host.address();
++    if (!host.name().isEmpty() && host.name() != host.address())
++        host_label = QStringLiteral("%1 (%2)").arg(host.name(), host.address());
++
++    const QString type_label = sessionName(session_type);
++    QString tab_title = type_label.isEmpty() ?
++        host_label : uiString(u"%1 \u00B7 %2").arg(host_label, type_label);
++
+     QIcon icon = sessionIcon(session_type);
+ 
+     client_window->setWindowIcon(icon);
+@@ -803,7 +834,7 @@ void MainWindow::onConnect(const HostConfig& host, proto::peer::SessionType sess
+     // The tab is created immediately; the connection progress is displayed by the status overlay
+     // inside the session window.
+     ClientTab* client_tab = new ClientTab(client_window);
+-    addTab(client_tab, computer_name, icon);
++    addTab(client_tab, tab_title, icon);
+ 
+     if (detached)
+     {
