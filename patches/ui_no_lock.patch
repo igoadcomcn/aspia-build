@@ -1,0 +1,183 @@
+diff --git a/source/client/desktop/settings_tab.cc b/source/client/desktop/settings_tab.cc
+index 6585dfa..1484181 100644
+--- a/source/client/desktop/settings_tab.cc
++++ b/source/client/desktop/settings_tab.cc
+@@ -113,6 +113,10 @@ SettingsTab::SettingsTab(QWidget* parent)
+     LOG(INFO) << "Ctor";
+     ui->setupUi(this);
+ 
++    // Custom build: the application has no master password and never locks itself, so the whole
++    // security section (lock timeout, automatic unlock, master password) is not shown.
++    ui->groupbox_security->hide();
++
+     Settings settings;
+     Database& db = Database::instance();
+ 
+diff --git a/source/client/main.cc b/source/client/main.cc
+index e983c10..4600a79 100644
+--- a/source/client/main.cc
++++ b/source/client/main.cc
+@@ -36,18 +36,11 @@
+ #include <QCommandLineParser>
+ #include <QDir>
+ 
+-#include <functional>
+-
+-#include "base/auto_qpointer.h"
+-#include "base/crypto/secure_string.h"
+ #include "client/database.h"
+-#include "client/master_password.h"
+ #include "client/system_settings.h"
+-#include "client/desktop/app_lock.h"
+ #include "client/desktop/main_window.h"
+ #include "client/desktop/update_server_dialog.h"
+ #include "client/mcp/mcp_worker.h"
+-#include "common/desktop/credentials_dialog.h"
+ #include "common/desktop/msg_box.h"
+ #include "common/desktop/update_dialog.h"
+ #endif // defined(Q_OS_ANDROID)
+@@ -88,62 +81,6 @@ void backupOnStartup()
+     }
+ }
+ 
+-//--------------------------------------------------------------------------------------------------
+-bool setMasterPassword()
+-{
+-    AutoQPointer<CredentialsDialog> dialog(
+-        new CredentialsDialog(CredentialsDialog::Type::SET_PASSWORD, nullptr));
+-    dialog->setWindowTitle(QApplication::translate("Client", "Set Master Password"));
+-    dialog->setHeaderIcon(":/img/lock.svg");
+-    dialog->setHeaderText(QApplication::translate(
+-        "Client", "Set a master password required to unlock the application."));
+-    dialog->setValidator([](CredentialsDialog* d) -> bool
+-    {
+-        SecureString new_password = d->password();
+-
+-        if (new_password.size() < MasterPassword::kMinPasswordLength)
+-        {
+-            MsgBox::warning(d, QApplication::translate(
+-                "Client", "The password can not be shorter than %n characters.",
+-                "", MasterPassword::kMinPasswordLength));
+-            return false;
+-        }
+-
+-        if (!MasterPassword::isSafePassword(new_password))
+-        {
+-            QString unsafe = QApplication::translate(
+-                "Client", "Password you entered does not meet the security requirements!");
+-            QString safe = QApplication::translate("Client",
+-                "The password must contain lowercase and uppercase characters, "
+-                "numbers and should not be shorter than %n characters.",
+-                "", MasterPassword::kSafePasswordLength);
+-            QString question = QApplication::translate(
+-                "Client", "Do you want to enter a different password?");
+-
+-            if (MsgBox::warning(d, QString("<b>%1</b><br/>%2<br/>%3").arg(unsafe, safe, question),
+-                                MsgBox::Yes | MsgBox::No) == MsgBox::Yes)
+-                return false;
+-        }
+-
+-        if (MasterPassword::setNew(new_password) != MasterPassword::Result::SUCCESS)
+-        {
+-            MsgBox::warning(d, QApplication::translate("Client", "Unable to set master password."));
+-            return false;
+-        }
+-
+-        return true;
+-    });
+-
+-    if (dialog->exec() != QDialog::Accepted)
+-    {
+-        LOG(INFO) << "Master password set cancelled by user";
+-        return false;
+-    }
+-
+-    LOG(INFO) << "Master password set";
+-    return true;
+-}
+-
+ } // namespace
+ #endif // !defined(Q_OS_ANDROID)
+ 
+@@ -298,74 +235,17 @@ int main(int argc, char* argv[])
+         return 0;
+     }
+ 
+-    if (MasterPassword::autoUnlock())
+-    {
+-        LOG(INFO) << "Unlocked automatically";
+-    }
+-    else if (MasterPassword::isSet())
+-    {
+-        LOG(INFO) << "Master password is set, prompting user";
+-
+-        switch (AppLock::unlock(true))
+-        {
+-            case AppLock::Result::UNLOCKED:
+-                break;
+-
+-            case AppLock::Result::RESET:
+-                if (!setMasterPassword())
+-                    return 0;
+-                break;
+-
+-            case AppLock::Result::CANCELLED:
+-                return 0;
+-
+-            case AppLock::Result::FAILED:
+-                return 1;
+-        }
+-    }
+-    else
+-    {
+-        LOG(INFO) << "Master password is not set, prompting user to set one";
+-
+-        if (!setMasterPassword())
+-            return 0;
+-    }
+-
++    // Custom build: the application has no master password and no lock screen. The database is
++    // used unencrypted and the client goes straight to the host list.
+     backupOnStartup();
+ 
+-    std::unique_ptr<MainWindow> main_window;
+-
+-    // The lock destroys the window with everything it shows, and the unlock creates a new one.
+-    std::function<void()> create_main_window = [&]()
+-    {
+-        main_window = std::make_unique<MainWindow>();
+-
+-        QObject::connect(&application, &Application::sig_windowActivated,
+-                         main_window.get(), &MainWindow::showAndActivate);
+-        QObject::connect(main_window.get(), &MainWindow::sig_lockRequested, &application, [&]()
+-        {
+-            // Until the new window there is no window on the screen, and closing the unlock dialog
+-            // would otherwise quit the application.
+-            const bool quit_on_last_window_closed = QApplication::quitOnLastWindowClosed();
+-            QApplication::setQuitOnLastWindowClosed(false);
++    MainWindow main_window;
+ 
+-            main_window.reset();
++    QObject::connect(&application, &Application::sig_windowActivated,
++                     &main_window, &MainWindow::showAndActivate);
+ 
+-            if (AppLock::unlock(false) != AppLock::Result::UNLOCKED)
+-            {
+-                QApplication::quit();
+-                return;
+-            }
+-
+-            create_main_window();
+-            QApplication::setQuitOnLastWindowClosed(quit_on_last_window_closed);
+-        }, Qt::QueuedConnection);
+-
+-        main_window->show();
+-        main_window->activateWindow();
+-    };
+-
+-    create_main_window();
++    main_window.show();
++    main_window.activateWindow();
+     return application.exec();
+ #endif // defined(Q_OS_ANDROID)
+ }
