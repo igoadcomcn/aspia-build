@@ -1,0 +1,172 @@
+name: build custom Aspia client (v3.3.5)
+
+# One-shot cloud build. The Windows runner is destroyed after the job, so
+# nothing is installed on your own PC.
+on:
+  workflow_dispatch:
+    inputs:
+      patch_file:
+        description: 'Patch filename(s) under patches/, comma separated. Use "none" for vanilla 3.3.5'
+        required: false
+        default: 'default_credentials.patch'
+
+# New repositories default to a read-only GITHUB_TOKEN. actions/cache/save@v4
+# needs actions:write, otherwise the "Persist vcpkg binary cache" step fails
+# and every retry has to rebuild Qt from scratch.
+# Only manual runs: pushing a new patch must NOT silently start a 6 h build.
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    env:
+      PATCH_FILE: ${{ inputs.patch_file || 'default_credentials.patch' }}
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+      VCPKG_DOWNLOADS: ${{ github.workspace }}\vcpkg-downloads
+      # A unique key per run + a prefix restore-key gives rolling cache: every
+      # failed/aborted run still contributes whatever it managed to compile.
+      CACHE_KEY: vcpkg-aspia-335-static-${{ github.run_id }}
+
+    steps:
+      # This checkout carries ONLY the helper files (this workflow + patches).
+      - name: Checkout helper files
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
+      # .gitmodules points at git@github.com:dchapyshev/vcpkg4aspia.git (SSH).
+      # Hosted runners have no SSH key. Rewrite at the git URL layer BEFORE any
+      # submodule command: "git submodule sync" would overwrite a manual
+      # `git config submodule.<name>.url` back to the SSH URL.
+      - name: Rewrite GitHub SSH URLs to HTTPS
+        shell: pwsh
+        run: |
+          git config --global 'url.https://github.com/.insteadOf' 'git@github.com:'
+          git config --global core.autocrlf false
+
+      # Pin the sources to the exact upstream tag the patch was written for.
+      # Deliberately NOT ${{ github.repository }}: a scratch repo has no tag.
+      - name: Checkout Aspia v3.3.5
+        uses: actions/checkout@v4
+        with:
+          repository: dchapyshev/aspia
+          ref: v3.3.5
+          submodules: false
+          path: aspia
+
+      - name: Prepare cache dirs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DOWNLOADS | Out-Null
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            vcpkg-bincache
+            vcpkg-downloads
+          key: ${{ env.CACHE_KEY }}
+          restore-keys: vcpkg-aspia-335-static-
+
+      # windows-2022 runners have VS 2022 (C++ workload), Windows SDK, WDK,
+      # CMake, Ninja and Git preinstalled. find_package(WDK REQUIRED) only looks
+      # for Windows Kits/.../um/avrt.h (part of the SDK), and we build only the
+      # aspia_client target, not the virtual display driver.
+      - name: MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      # Rebuild the working tree from the index so files are LF, matching the
+      # patch. On Windows Git may have checked everything out as CRLF, which
+      # makes `git apply` fail with "patch does not apply". Do this BEFORE the
+      # submodule is materialized so checkout-index never touches a gitlink.
+      - name: Normalize line endings before patching
+        shell: pwsh
+        working-directory: aspia
+        run: git checkout-index -a -f
+
+      - name: Init vcpkg4aspia submodule and bootstrap
+        shell: pwsh
+        working-directory: aspia
+        run: |
+          git submodule update --init --recursive
+          .\vcpkg4aspia\bootstrap-vcpkg.bat
+
+      - name: Apply custom patch
+        shell: pwsh
+        working-directory: aspia
+        run: |
+          if ($env:PATCH_FILE -eq 'none' -or [string]::IsNullOrWhiteSpace($env:PATCH_FILE)) {
+            Write-Host 'No patch requested, building vanilla 3.3.5'
+            exit 0
+          }
+          foreach ($name in ($env:PATCH_FILE -split '[,;\s]+' | Where-Object { $_ })) {
+            $patch = Join-Path $env:GITHUB_WORKSPACE "custom\patches\$name"
+            if (-not (Test-Path $patch)) { throw "Patch not found: $patch" }
+            # The helper checkout happens BEFORE core.autocrlf=false is set, so
+            # Git for Windows may have written the .patch as CRLF. git apply
+            # cannot parse a CRLF diff -> normalize in place (UTF-8, no BOM).
+            $text = [System.IO.File]::ReadAllText($patch) -replace "`r`n", "`n"
+            [System.IO.File]::WriteAllText($patch, $text, (New-Object System.Text.UTF8Encoding($false)))
+            git apply --check --verbose $patch
+            if ($LASTEXITCODE -ne 0) { throw "git apply --check failed: $name" }
+            git apply --verbose $patch
+            if ($LASTEXITCODE -ne 0) { throw "git apply failed: $name" }
+            Write-Host "Applied $name"
+          }
+
+      # The first configure compiles Qt 6 (qtbase/qtsvg/qttools) and all vcpkg
+      # dependencies from source. This is the slow, disk-hungry step.
+      - name: Configure
+        shell: pwsh
+        working-directory: aspia
+        run: cmake --preset local-win-x64
+
+      # Save immediately instead of relying on actions/cache's post step, which
+      # never runs when a job is killed by the 6 h timeout.
+      - name: Persist vcpkg binary cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            vcpkg-bincache
+            vcpkg-downloads
+          key: ${{ env.CACHE_KEY }}
+
+      # Qt's buildtrees can eat tens of GB. The installed headers/libs are in
+      # builds/local-win-x64/vcpkg_installed, so the intermediate objects are no
+      # longer needed once configure has finished.
+      - name: Reclaim disk space
+        shell: pwsh
+        run: |
+          foreach ($p in @('aspia\vcpkg4aspia\buildtrees', 'aspia\vcpkg4aspia\packages')) {
+            if (Test-Path $p) { Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue }
+          }
+          Get-PSDrive C | Select-Object Used, Free
+
+      - name: Build aspia_client (Release)
+        shell: pwsh
+        working-directory: aspia
+        run: cmake --build builds/local-win-x64 --config Release --target aspia_client
+
+      - name: Show build outputs
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path aspia\builds) {
+            Get-ChildItem -Path aspia\builds -Recurse -Filter aspia_client.exe |
+              Select-Object FullName, Length
+          }
+
+      - name: Upload portable client
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspia-client-3.3.5-custom
+          path: aspia/builds/**/aspia_client.exe
+          if-no-files-found: error
+          retention-days: 30
