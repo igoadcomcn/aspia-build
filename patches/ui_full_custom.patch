@@ -1,0 +1,194 @@
+diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
+index cc38a9e..1b1f5ba 100644
+--- a/source/client/desktop/main_window.cc
++++ b/source/client/desktop/main_window.cc
+@@ -21,6 +21,7 @@
+ #include <QCloseEvent>
+ #include <QDesktopServices>
+ #include <QLineEdit>
++#include <QMenu>
+ #include <QScreen>
+ #include <QShortcut>
+ #include <QSignalBlocker>
+@@ -35,6 +36,7 @@
+ #include "base/logging.h"
+ #include "base/peer/host_id.h"
+ #include "base/update/update_info.h"
++#include "client/config.h"
+ #include "client/database.h"
+ #include "client/settings.h"
+ #include "client/system_settings.h"
+@@ -129,6 +131,68 @@ MainWindow::MainWindow(QWidget* parent)
+     margin->setFixedWidth(kSearchFieldMarginPx);
+     ui->toolbar->addWidget(margin);
+ 
++    // Custom build: a fixed "+" button at the far right of the toolbar. Unlike the actions
++    // injected by installTabActions(), a plain widget survives removeTabActions(), so it stays
++    // next to the window buttons no matter which tab is active.
++    QToolButton* add_button = new QToolButton(this);
++    add_button->setText(QStringLiteral("+"));
++    add_button->setToolTip(tr("Connect to a saved host"));
++    add_button->setAutoRaise(true);
++    add_button->setPopupMode(QToolButton::InstantPopup);
++    add_button->setToolButtonStyle(Qt::ToolButtonTextOnly);
++
++    QMenu* hosts_menu = new QMenu(add_button);
++    add_button->setMenu(hosts_menu);
++    ui->toolbar->addWidget(add_button);
++
++    connect(hosts_menu, &QMenu::aboutToShow, this, [this, hosts_menu]()
++    {
++        hosts_menu->clear();
++
++        QList<LocalHostConfig> hosts;
++        if (Database::instance().allLocalHosts(&hosts) == Database::ReadResult::FAILED)
++        {
++            hosts_menu->addAction(tr("Unable to read the host list"))->setEnabled(false);
++            return;
++        }
++
++        if (hosts.isEmpty())
++        {
++            hosts_menu->addAction(tr("No saved hosts"))->setEnabled(false);
++        }
++        else
++        {
++            for (const LocalHostConfig& saved_host : hosts)
++            {
++                const QString label = saved_host.name().isEmpty()
++                    ? saved_host.address()
++                    : QStringLiteral("%1  (%2)").arg(saved_host.name(), saved_host.address());
++
++                QAction* action = hosts_menu->addAction(label);
++                const HostConfig host = HostConfig::forLocalHost(saved_host);
++
++                connect(action, &QAction::triggered, this, [this, host]()
++                {
++                    onConnect(host, proto::peer::SESSION_TYPE_DESKTOP);
++                });
++            }
++        }
++
++        hosts_menu->addSeparator();
++        hosts_menu->addAction(tr("Manage hosts..."), this, [this]()
++        {
++            if (ManagementTab* management_tab = managementTab())
++            {
++                const int index = ui->tabs->indexOf(management_tab);
++                if (index != -1)
++                {
++                    ui->tabs->tabBar()->setTabVisible(index, true);
++                    ui->tabs->setCurrentIndex(index);
++                }
++            }
++        });
++    });
++
+     bool search_field_enabled = settings.isSearchFieldEnabled();
+     ui->action_search_field->setChecked(search_field_enabled);
+     search_action_->setVisible(search_field_enabled);
+@@ -584,6 +648,31 @@ void MainWindow::onCloseTab(int index)
+ 
+     ui->tabs->removeTab(index);
+     delete tab;
++
++    // Custom build: when the last session is gone, bring the host list back.
++    bool has_session = false;
++    for (int i = 0; i < ui->tabs->count(); ++i)
++    {
++        Tab* remaining = tabAt(i);
++        if (remaining && remaining->tabType() == Tab::Type::SESSION)
++        {
++            has_session = true;
++            break;
++        }
++    }
++
++    if (!has_session)
++    {
++        if (ManagementTab* management_tab = managementTab())
++        {
++            const int management_index = ui->tabs->indexOf(management_tab);
++            if (management_index != -1)
++            {
++                ui->tabs->tabBar()->setTabVisible(management_index, true);
++                ui->tabs->setCurrentIndex(management_index);
++            }
++        }
++    }
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -721,6 +810,15 @@ void MainWindow::onConnect(const HostConfig& host, proto::peer::SessionType sess
+         int index = ui->tabs->indexOf(client_tab);
+         ui->tabs->tabBar()->setTabVisible(index, false);
+         client_tab->detachToWindow();
++
++        // Custom build: in detached mode the session lives in its own window, so the host list
++        // must stay visible in the main window.
++        if (ManagementTab* management_tab = managementTab())
++        {
++            const int management_index = ui->tabs->indexOf(management_tab);
++            if (management_index != -1)
++                ui->tabs->tabBar()->setTabVisible(management_index, true);
++        }
+     }
+ }
+ 
+@@ -983,6 +1081,18 @@ void MainWindow::addTab(Tab* tab, const QString& title, const QIcon& icon)
+     });
+ 
+     ui->tabs->setCurrentIndex(index);
++
++    // Custom build: as soon as a session exists, hide the host list so the remote desktop gets
++    // the whole window. It comes back in onCloseTab() when the last session is closed.
++    if (tab->tabType() == Tab::Type::SESSION)
++    {
++        if (ManagementTab* management_tab = managementTab())
++        {
++            const int management_index = ui->tabs->indexOf(management_tab);
++            if (management_index != -1)
++                ui->tabs->tabBar()->setTabVisible(management_index, false);
++        }
++    }
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+diff --git a/source/client/desktop/management/local_group_widget.cc b/source/client/desktop/management/local_group_widget.cc
+index 37412b6..2d9782d 100644
+--- a/source/client/desktop/management/local_group_widget.cc
++++ b/source/client/desktop/management/local_group_widget.cc
+@@ -145,7 +145,14 @@ QList<LocalHostConfig> LocalGroupWidget::selectedHosts() const
+ void LocalGroupWidget::showGroup(qint64 group_id)
+ {
+     QList<LocalHostConfig> hosts;
+-    const Database::ReadResult result = Database::instance().localHostList(group_id, &hosts);
++    Database::ReadResult result;
++
++    // Custom build: the group tree is hidden, so group_id <= 0 means "all saved hosts".
++    // This also keeps search, drag-drop and reload working after the sidebar is hidden.
++    if (group_id <= 0)
++        result = Database::instance().allLocalHosts(&hosts);
++    else
++        result = Database::instance().localHostList(group_id, &hosts);
+ 
+     if (result != Database::ReadResult::FAILED || group_id != current_group_id_)
+     {
+diff --git a/source/client/desktop/management_tab.cc b/source/client/desktop/management_tab.cc
+index d87e09f..f43ea70 100644
+--- a/source/client/desktop/management_tab.cc
++++ b/source/client/desktop/management_tab.cc
+@@ -322,7 +322,12 @@ ManagementTab::ManagementTab(QWidget* parent)
+     });
+ 
+     local_group_widget_->setOnlineCheckEnabled(ui->action_online_check->isChecked());
+-    local_group_widget_->showGroup(ui->sidebar->currentGroupId());
++
++    // Custom build: the group tree is not needed. The widget object stays alive (20+ places in
++    // this file reference ui->sidebar), it is just hidden, and the list shows every saved host
++    // in one flat list instead of one group at a time.
++    ui->sidebar->hide();
++    local_group_widget_->showGroup(-1);
+     switchContent(local_group_widget_);
+     updateActionsState();
+ 
