@@ -1,0 +1,86 @@
+diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
+index 70fdc16..81269e3 100644
+--- a/source/client/desktop/main_window.cc
++++ b/source/client/desktop/main_window.cc
+@@ -18,6 +18,7 @@
+ 
+ #include "client/desktop/main_window.h"
+ 
++#include <QApplication>
+ #include <QCloseEvent>
+ #include <QDesktopServices>
+ #include <QFont>
+@@ -231,6 +232,13 @@ MainWindow::MainWindow(QWidget* parent)
+     ui->action_sessions_in_tabs->setChecked(true);
+     ui->action_sessions_in_tabs->setVisible(false);
+ 
++    // Custom build: the menu bar and the main toolbar belong to the host list only. As soon as a
++    // remote session has focus they are hidden (see updateMainChrome()), so the session picture
++    // fills the window and the session's own floating toolbar is used to operate it.
++    ui->action_toolbar->setChecked(true);
++    ui->action_search_field->setChecked(true);
++    ui->menubar->setVisible(true);
++
+     const bool always_on_top = settings.alwaysOnTop();
+     ui->action_always_on_top->setChecked(always_on_top);
+     setWindowFlag(Qt::WindowStaysOnTopHint, always_on_top);
+@@ -323,6 +331,8 @@ MainWindow::MainWindow(QWidget* parent)
+     app_lock_ = new AppLock(this);
+     connect(app_lock_, &AppLock::sig_lockRequested, this, &MainWindow::onLockRequested);
+     app_lock_->setTimeout(Database::instance().lockTimeout());
++
++    updateMainChrome();
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -650,6 +660,7 @@ void MainWindow::onCurrentTabChanged(int index)
+     installTabActions(active_tab_);
+     active_tab_->activate();
+     syncSearchField();
++    updateMainChrome();
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -1263,6 +1274,18 @@ void MainWindow::syncSearchField()
+     }
+ }
+ 
++//--------------------------------------------------------------------------------------------------
++void MainWindow::updateMainChrome()
++{
++    // Custom build: the menu bar and the toolbar are only needed on the host list (settings,
++    // credentials, quick connect, add/edit host). A remote session takes the whole window and is
++    // operated through its own floating toolbar instead.
++    const bool is_management = active_tab_ && active_tab_->tabType() == Tab::Type::MANAGEMENT;
++
++    ui->menubar->setVisible(is_management);
++    ui->toolbar->setVisible(is_management);
++}
++
+ //--------------------------------------------------------------------------------------------------
+ void MainWindow::installTabActions(Tab* tab)
+ {
+diff --git a/source/client/desktop/main_window.h b/source/client/desktop/main_window.h
+index 1803e64..568f44a 100644
+--- a/source/client/desktop/main_window.h
++++ b/source/client/desktop/main_window.h
+@@ -67,6 +67,9 @@ protected:
+     // QMainWindow implementation.
+     void closeEvent(QCloseEvent* event) final;
+ 
++    // QObject implementation.
++    bool eventFilter(QObject* object, QEvent* event) final;
++
+     // McpController::MainWindow implementation.
+     QList<McpController::ClientInfo> mcpClients() const final;
+     McpController::DesktopWindow* mcpDesktopWindow(qint64 client_id) const final;
+@@ -122,6 +125,9 @@ private:
+     void updateSeparatorVisibility();
+     QMenu* menuForActionGroup(Tab::ActionRole group) const;
+ 
++    // Custom build: shows the menu bar / main toolbar only while the host list has focus.
++    void updateMainChrome();
++
+     std::unique_ptr<Ui::MainWindow> ui;
+ 
+     QLineEdit* search_field_ = nullptr;
