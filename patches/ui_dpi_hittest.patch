@@ -1,0 +1,39 @@
+diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
+index 24ec166..54e0fa6 100644
+--- a/source/client/desktop/main_window.cc
++++ b/source/client/desktop/main_window.cc
+@@ -1444,7 +1444,19 @@ bool MainWindow::nativeEvent(const QByteArray& event_type, void* message, qintpt
+ 
+         if (msg->message == WM_NCHITTEST)
+         {
+-            const QPoint global_pos(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
++            // The point arrives in physical pixels, while the widget geometry used below is in
++            // Qt's logical (device independent) pixels. Without the conversion a window on a
++            // 150%/200% display gets a point far outside its own rect: "right" and "bottom" then
++            // look hit at once, the whole client area is reported as the bottom-right resize
++            // corner and the window swallows every click. On 100% displays both spaces are equal,
++            // which is why this only shows up on scaled screens - and only after a restore, since
++            // the edges are not hit-tested while the window is maximized.
++            const QPoint native_pos(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
++            const qreal scale = windowHandle() ? windowHandle()->devicePixelRatio() : 1.0;
++            const QPoint global_pos = (scale > 0.0 && scale != 1.0)
++                ? QPoint(qRound(native_pos.x() / scale), qRound(native_pos.y() / scale))
++                : native_pos;
++
+             const QPoint pos = mapFromGlobal(global_pos);
+             const QRect client_rect = rect();
+ 
+@@ -1455,7 +1467,12 @@ bool MainWindow::nativeEvent(const QByteArray& event_type, void* message, qintpt
+                 corner->rect().contains(corner->mapFrom(this, pos));
+ 
+             // A frameless window has no native border, so the resize edges are hit-tested here.
+-            if (!isMaximized() && !isFullScreen() && !over_corner)
++            // A point outside the window (it can happen while an edge is being dragged) must not
++            // be mapped to an edge either.
++            const bool inside = client_rect.adjusted(-kResizeBorderPx, -kResizeBorderPx,
++                kResizeBorderPx, kResizeBorderPx).contains(pos);
++
++            if (!isMaximized() && !isFullScreen() && !over_corner && inside)
+             {
+                 const bool on_left = pos.x() < kResizeBorderPx;
+                 const bool on_right = pos.x() >= client_rect.width() - kResizeBorderPx;
