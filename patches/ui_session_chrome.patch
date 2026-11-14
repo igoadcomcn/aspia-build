@@ -1,16 +1,59 @@
 diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
-index 70fdc16..25be133 100644
+index 70fdc16..8c28e1c 100644
 --- a/source/client/desktop/main_window.cc
 +++ b/source/client/desktop/main_window.cc
-@@ -18,6 +18,7 @@
+@@ -18,9 +18,13 @@
  
  #include "client/desktop/main_window.h"
  
++#include <QAbstractButton>
 +#include <QApplication>
++#include <QBoxLayout>
  #include <QCloseEvent>
  #include <QDesktopServices>
  #include <QFont>
-@@ -231,6 +232,14 @@ MainWindow::MainWindow(QWidget* parent)
++#include <QLabel>
+ #include <QLineEdit>
+ #include <QMenu>
+ #include <QScreen>
+@@ -32,6 +36,14 @@
+ #include <QUrl>
+ #include <QWindow>
+ 
++#if defined(Q_OS_WIN)
++#  ifndef NOMINMAX
++#    define NOMINMAX
++#  endif
++#  include <windows.h>
++#  include <windowsx.h>
++#endif
++
+ #include "base/auto_qpointer.h"
+ #include "base/gui_application.h"
+ #include "base/logging.h"
+@@ -75,6 +87,12 @@ constexpr int kSearchFieldMarginPx = 5;
+ // Custom build: size of the "+" button that sits in the top-right corner of the tab bar.
+ constexpr int kAddButtonSizePx = 22;
+ 
++// Custom build: size of the window buttons that live in the same corner (the window is frameless,
++// its caption is part of the tab strip) and width of the invisible resize border.
++constexpr int kWindowButtonWidthPx = 36;
++constexpr int kWindowButtonHeightPx = 22;
++constexpr int kResizeBorderPx = 6;
++
+ // Custom build: localized UI strings of this file are written as UTF-16 escapes. MSVC assumes
+ // the ANSI code page for sources without a BOM, so plain Chinese text in a UTF-8 file would come
+ // out as mojibake on a build machine whose code page is not 65001.
+@@ -163,7 +181,7 @@ MainWindow::MainWindow(QWidget* parent)
+ 
+     QMenu* hosts_menu = new QMenu(add_button);
+     add_button->setMenu(hosts_menu);
+-    ui->tabs->setCornerWidget(add_button, Qt::TopRightCorner);
++    createWindowCaption(add_button);
+ 
+     connect(hosts_menu, &QMenu::aboutToShow, this, [this, hosts_menu]()
+     {
+@@ -231,6 +249,14 @@ MainWindow::MainWindow(QWidget* parent)
      ui->action_sessions_in_tabs->setChecked(true);
      ui->action_sessions_in_tabs->setVisible(false);
  
@@ -20,12 +63,28 @@ index 70fdc16..25be133 100644
 +    ui->action_toolbar->setChecked(true);
 +    ui->action_search_field->setChecked(true);
 +    search_action_->setVisible(true);
-+    ui->menubar->setVisible(true);
++    ui->menubar->setVisible(false);
 +
      const bool always_on_top = settings.alwaysOnTop();
      ui->action_always_on_top->setChecked(always_on_top);
      setWindowFlag(Qt::WindowStaysOnTopHint, always_on_top);
-@@ -323,6 +332,8 @@ MainWindow::MainWindow(QWidget* parent)
+@@ -317,12 +343,22 @@ MainWindow::MainWindow(QWidget* parent)
+     ui->menu_session_type->menuAction()->setVisible(false);
+     ui->menu_action->menuAction()->setVisible(false);
+ 
+-    // Create default tabs.
+-    addTab(new ManagementTab(this), tr("Management"), QIcon(":/img/cms.svg"));
++    // Create default tabs. The host list has no menu bar any more, so it carries the global
++    // commands in a context menu instead.
++    ManagementTab* management_tab = new ManagementTab(this);
++    management_tab->setContextMenuPolicy(Qt::CustomContextMenu);
++    connect(management_tab, &QWidget::customContextMenuRequested, this,
++            [this, management_tab](const QPoint& pos)
++    {
++        onGlobalContextMenu(management_tab->mapToGlobal(pos));
++    });
++    addTab(management_tab, tr("Management"), QIcon(":/img/cms.svg"));
+ 
      app_lock_ = new AppLock(this);
      connect(app_lock_, &AppLock::sig_lockRequested, this, &MainWindow::onLockRequested);
      app_lock_->setTimeout(Database::instance().lockTimeout());
@@ -34,7 +93,7 @@ index 70fdc16..25be133 100644
  }
  
  //--------------------------------------------------------------------------------------------------
-@@ -650,6 +661,7 @@ void MainWindow::onCurrentTabChanged(int index)
+@@ -650,6 +686,7 @@ void MainWindow::onCurrentTabChanged(int index)
      installTabActions(active_tab_);
      active_tab_->activate();
      syncSearchField();
@@ -42,7 +101,7 @@ index 70fdc16..25be133 100644
  }
  
  //--------------------------------------------------------------------------------------------------
-@@ -1263,6 +1275,29 @@ void MainWindow::syncSearchField()
+@@ -1263,6 +1300,262 @@ void MainWindow::syncSearchField()
      }
  }
  
@@ -65,24 +124,297 @@ index 70fdc16..25be133 100644
 +        }
 +    }
 +
-+    ui->menubar->setVisible(!is_session);
++    ui->menubar->setVisible(false);
 +    ui->toolbar->setVisible(!has_own_toolbar);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::createWindowCaption(QToolButton* add_button)
++{
++    // Custom build: the window is frameless. Its caption - the application name and the three
++    // window buttons - lives in the top-right corner of the tab strip, so the client looks like one
++    // continuous tab bar and a maximized window is all tabs and picture.
++    setWindowFlag(Qt::FramelessWindowHint, true);
++
++    caption_widget_ = new QWidget(ui->tabs);
++    caption_widget_->setObjectName(QStringLiteral("captionWidget"));
++
++    QBoxLayout* caption_layout = new QBoxLayout(QBoxLayout::LeftToRight, caption_widget_);
++    caption_layout->setContentsMargins(8, 2, 0, 2);
++    caption_layout->setSpacing(2);
++
++    caption_label_ = new QLabel(windowTitle(), caption_widget_);
++    caption_label_->setObjectName(QStringLiteral("captionLabel"));
++    {
++        QFont font = caption_label_->font();
++        font.setBold(true);
++        caption_label_->setFont(font);
++    }
++    caption_layout->addWidget(caption_label_);
++    caption_layout->addSpacing(6);
++
++    auto add_window_button = [this, caption_layout](const QString& text, const QString& tooltip)
++    {
++        QToolButton* button = new QToolButton(caption_widget_);
++        button->setText(text);
++        button->setToolTip(tooltip);
++        button->setAutoRaise(true);
++        button->setFocusPolicy(Qt::NoFocus);
++        button->setFixedSize(kWindowButtonWidthPx, kWindowButtonHeightPx);
++        caption_layout->addWidget(button);
++        return button;
++    };
++
++    QToolButton* minimize_button = add_window_button(uiString(u"\u2013"), tr("Minimize"));
++    connect(minimize_button, &QToolButton::clicked, this, [this]() { showMinimized(); });
++
++    maximize_button_ = add_window_button(uiString(u"\u25A1"), tr("Maximize"));
++    connect(maximize_button_, &QToolButton::clicked, this, &MainWindow::onMaximizeClicked);
++
++    QToolButton* close_button = add_window_button(uiString(u"\u2715"), tr("Close"));
++    close_button->setObjectName(QStringLiteral("closeWindowButton"));
++    connect(close_button, &QToolButton::clicked, this, &MainWindow::close);
++
++    QWidget* corner = new QWidget(ui->tabs);
++    corner->setObjectName(QStringLiteral("cornerWidget"));
++
++    QBoxLayout* corner_layout = new QBoxLayout(QBoxLayout::LeftToRight, corner);
++    corner_layout->setContentsMargins(0, 0, 2, 0);
++    corner_layout->setSpacing(2);
++    corner_layout->addWidget(add_button);
++    corner_layout->addSpacing(6);
++    corner_layout->addWidget(caption_widget_);
++
++    ui->tabs->setCornerWidget(corner, Qt::TopRightCorner);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::onMaximizeClicked()
++{
++    if (isMaximized())
++        showNormal();
++    else
++        showMaximized();
++}
++
++//--------------------------------------------------------------------------------------------------
++bool MainWindow::isCaptionPosition(const QPoint& pos) const
++{
++    QWidget* widget = childAt(pos);
++    if (!widget)
++        return false;
++
++    // The window buttons and the "+" button must stay clickable, so they never count as caption.
++    if (qobject_cast<QAbstractButton*>(widget))
++        return false;
++
++    if (caption_widget_ && (widget == caption_widget_ || caption_widget_->isAncestorOf(widget)))
++        return true;
++
++    // The empty part of the tab strip can be used to drag the window as well.
++    QTabBar* tab_bar = ui->tabs->tabBar();
++    const QPoint bar_pos = tab_bar->mapFrom(this, pos);
++    return tab_bar->rect().contains(bar_pos) && tab_bar->tabAt(bar_pos) == -1;
++}
++
++//--------------------------------------------------------------------------------------------------
++bool MainWindow::nativeEvent(const QByteArray& event_type, void* message, qintptr* result)
++{
++#if defined(Q_OS_WIN)
++    if (event_type == QByteArrayLiteral("windows_generic_MSG") && message)
++    {
++        MSG* msg = static_cast<MSG*>(message);
++
++        // A frameless window would be maximized over the taskbar, so the limit is clamped to the
++        // work area of the current monitor.
++        if (msg->message == WM_GETMINMAXINFO)
++        {
++            HMONITOR monitor = MonitorFromWindow(reinterpret_cast<HWND>(winId()),
++                                                 MONITOR_DEFAULTTONEAREST);
++            MONITORINFO monitor_info = {};
++            monitor_info.cbSize = sizeof(monitor_info);
++
++            if (GetMonitorInfo(monitor, &monitor_info))
++            {
++                MINMAXINFO* min_max_info = reinterpret_cast<MINMAXINFO*>(msg->lParam);
++                min_max_info->ptMaxPosition.x = monitor_info.rcWork.left - monitor_info.rcMonitor.left;
++                min_max_info->ptMaxPosition.y = monitor_info.rcWork.top - monitor_info.rcMonitor.top;
++                min_max_info->ptMaxSize.x = monitor_info.rcWork.right - monitor_info.rcWork.left;
++                min_max_info->ptMaxSize.y = monitor_info.rcWork.bottom - monitor_info.rcWork.top;
++                return true;
++            }
++        }
++
++        if (msg->message == WM_NCHITTEST)
++        {
++            const QPoint global_pos(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
++            const QPoint pos = mapFromGlobal(global_pos);
++            const QRect client_rect = rect();
++
++            // A frameless window has no native border, so the resize edges are hit-tested here.
++            if (!isMaximized() && !isFullScreen())
++            {
++                const bool on_left = pos.x() < kResizeBorderPx;
++                const bool on_right = pos.x() >= client_rect.width() - kResizeBorderPx;
++                const bool on_top = pos.y() < kResizeBorderPx;
++                const bool on_bottom = pos.y() >= client_rect.height() - kResizeBorderPx;
++
++                if (on_left || on_right || on_top || on_bottom)
++                {
++                    if (on_top && on_left)
++                        *result = HTTOPLEFT;
++                    else if (on_top && on_right)
++                        *result = HTTOPRIGHT;
++                    else if (on_bottom && on_left)
++                        *result = HTBOTTOMLEFT;
++                    else if (on_bottom && on_right)
++                        *result = HTBOTTOMRIGHT;
++                    else if (on_left)
++                        *result = HTLEFT;
++                    else if (on_right)
++                        *result = HTRIGHT;
++                    else if (on_top)
++                        *result = HTTOP;
++                    else
++                        *result = HTBOTTOM;
++                    return true;
++                }
++            }
++
++            // Caption area: native dragging, double-click to maximize and Aero snap keep working.
++            if (!isFullScreen() && isCaptionPosition(pos))
++            {
++                *result = HTCAPTION;
++                return true;
++            }
++        }
++    }
++#endif
++    return QMainWindow::nativeEvent(event_type, message, result);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::changeEvent(QEvent* event)
++{
++    if (event->type() == QEvent::WindowTitleChange && caption_label_)
++        caption_label_->setText(windowTitle());
++
++    if (event->type() == QEvent::WindowStateChange && maximize_button_)
++    {
++        maximize_button_->setText(isMaximized() ? uiString(u"\u2750") : uiString(u"\u25A1"));
++        maximize_button_->setToolTip(isMaximized() ? tr("Restore") : tr("Maximize"));
++    }
++
++    QMainWindow::changeEvent(event);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::onGlobalContextMenu(const QPoint& global_pos)
++{
++    // Custom build: the menu bar is gone, so the host list exposes the same commands through a
++    // context menu. The actions themselves are shared with the (hidden) menus, so their state,
++    // shortcuts and signals keep working.
++    QMenu menu(this);
++
++    for (QAction* top_action : ui->menubar->actions())
++    {
++        QMenu* source = top_action->menu();
++        if (!source || !top_action->isVisible())
++            continue;
++
++        QList<QAction*> entries;
++        for (QAction* action : source->actions())
++        {
++            if (action->isSeparator() || !action->isVisible())
++                continue;
++            entries.append(action);
++        }
++
++        if (entries.isEmpty())
++            continue;
++
++        if (!menu.isEmpty())
++            menu.addSeparator();
++
++        menu.addSection(top_action->text());
++
++        for (QAction* action : entries)
++        {
++            if (QMenu* submenu = action->menu())
++            {
++                QMenu* copy = menu.addMenu(action->text());
++                for (QAction* item : submenu->actions())
++                {
++                    if (item->isSeparator() || !item->isVisible())
++                        continue;
++                    copy->addAction(item);
++                }
++            }
++            else
++            {
++                menu.addAction(action);
++            }
++        }
++    }
++
++    if (!menu.isEmpty())
++        menu.exec(global_pos);
 +}
 +
  //--------------------------------------------------------------------------------------------------
  void MainWindow::installTabActions(Tab* tab)
  {
 diff --git a/source/client/desktop/main_window.h b/source/client/desktop/main_window.h
-index 1803e64..9dc8cd2 100644
+index 1803e64..0b6ad09 100644
 --- a/source/client/desktop/main_window.h
 +++ b/source/client/desktop/main_window.h
-@@ -122,6 +122,9 @@ private:
+@@ -42,6 +42,8 @@ class Tab;
+ class ManagementTab;
+ class SearchDialog;
+ class QLineEdit;
++class QLabel;
++class QToolButton;
+ class HostConfig;
+ 
+ class MainWindow final
+@@ -66,6 +68,11 @@ signals:
+ protected:
+     // QMainWindow implementation.
+     void closeEvent(QCloseEvent* event) final;
++    void changeEvent(QEvent* event) final;
++
++    // QWidget implementation. The window is frameless, so the native hit test decides where the
++    // window can be dragged and resized.
++    bool nativeEvent(const QByteArray& event_type, void* message, qintptr* result) final;
+ 
+     // McpController::MainWindow implementation.
+     QList<McpController::ClientInfo> mcpClients() const final;
+@@ -122,6 +129,18 @@ private:
      void updateSeparatorVisibility();
      QMenu* menuForActionGroup(Tab::ActionRole group) const;
  
 +    // Custom build: shows the menu bar / main toolbar only while the host list has focus.
 +    void updateMainChrome();
 +
++    // Custom build: frameless window whose caption (application name + window buttons) sits in the
++    // top-right corner of the tab strip.
++    void createWindowCaption(QToolButton* add_button);
++    void onMaximizeClicked();
++    bool isCaptionPosition(const QPoint& pos) const;
++
++    // Custom build: the menus of the host list moved into a context menu.
++    void onGlobalContextMenu(const QPoint& global_pos);
++
      std::unique_ptr<Ui::MainWindow> ui;
  
      QLineEdit* search_field_ = nullptr;
+@@ -129,6 +148,9 @@ private:
+     SearchDialog* search_dialog_ = nullptr;
+     AppLock* app_lock_ = nullptr;
+     Tab* active_tab_ = nullptr;
++    QWidget* caption_widget_ = nullptr;
++    QLabel* caption_label_ = nullptr;
++    QToolButton* maximize_button_ = nullptr;
+     QList<QPointer<QAction>> tab_toolbar_actions_;
+     QList<QPair<QMenu*, QList<QPointer<QAction>>>> tab_menu_actions_;
+ 
