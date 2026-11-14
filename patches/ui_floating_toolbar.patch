@@ -1,5 +1,5 @@
 diff --git a/source/client/desktop/desktop/desktop_toolbar.cc b/source/client/desktop/desktop/desktop_toolbar.cc
-index 0609958..7da0bba 100644
+index 0609958..5fbf6e9 100644
 --- a/source/client/desktop/desktop/desktop_toolbar.cc
 +++ b/source/client/desktop/desktop/desktop_toolbar.cc
 @@ -615,34 +615,22 @@ void DesktopToolBar::startRecording(bool enable)
@@ -13,6 +13,8 @@ index 0609958..7da0bba 100644
 -
 -    if (is_tabbed_ == tabbed)
 -        return;
+-
+-    is_tabbed_ = tabbed;
 +    // Custom build: the client window has no toolbar of its own any more, so the panel keeps the
 +    // floating behaviour even when the session lives in a tab. In tabbed mode the original code
 +    // hid the whole widget and disabled the hover logic (see isPanelHidden()/enterEvent()), which
@@ -20,17 +22,15 @@ index 0609958..7da0bba 100644
 +    if (hide_timer_->isActive())
 +        hide_timer_->stop();
  
--    is_tabbed_ = tabbed;
+-    if (tabbed)
+-    {
+-        if (hide_timer_->isActive())
+-            hide_timer_->stop();
 +    const bool is_pinned = ui->action_pin->isChecked();
 +    ui->toolbar->setVisible(is_pinned);
 +    ui->frame->setVisible(!is_pinned);
 +    show();
  
--    if (tabbed)
--    {
--        if (hide_timer_->isActive())
--            hide_timer_->stop();
--
 -        hide();
 -    }
 -    else
@@ -50,87 +50,200 @@ index 0609958..7da0bba 100644
  }
  
  //--------------------------------------------------------------------------------------------------
+@@ -751,6 +739,27 @@ bool DesktopToolBar::isPanelPinned() const
+     return ui->action_pin->isChecked();
+ }
+ 
++//--------------------------------------------------------------------------------------------------
++void DesktopToolBar::revealPanel()
++{
++    // Custom build: the panel is opened by the desktop window as well (mouse on the top edge of the
++    // picture), so it must be re-openable an unlimited number of times. Every early return here made
++    // the panel appear exactly once, which is why the state is checked against the panel itself and
++    // not against temporary hover flags.
++    if (!ui->toolbar->isHidden())
++        return;
++
++    leaved_ = false;
++
++    if (hide_timer_->isActive())
++        hide_timer_->stop();
++
++    ui->toolbar->show();
++    ui->frame->hide();
++
++    emit sig_showHidePanel();
++}
++
+ //--------------------------------------------------------------------------------------------------
+ void DesktopToolBar::enterEvent(QEnterEvent* /* event */)
+ {
+@@ -763,15 +772,7 @@ void DesktopToolBar::enterEvent(QEnterEvent* /* event */)
+         hide_timer_->stop();
+ 
+     if (allow_hide_)
+-    {
+-        if (ui->toolbar->isHidden())
+-        {
+-            ui->toolbar->show();
+-            ui->frame->hide();
+-
+-            emit sig_showHidePanel();
+-        }
+-    }
++        revealPanel();
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+diff --git a/source/client/desktop/desktop/desktop_toolbar.h b/source/client/desktop/desktop/desktop_toolbar.h
+index 4d50ac0..6afcd4e 100644
+--- a/source/client/desktop/desktop/desktop_toolbar.h
++++ b/source/client/desktop/desktop/desktop_toolbar.h
+@@ -93,6 +93,11 @@ public:
+     bool isPanelHidden() const;
+     bool isPanelPinned() const;
+ 
++    // Custom build: opens the floating panel. Called by the desktop window when the mouse reaches
++    // the top edge of the picture, which makes the panel reachable even though it only shows a
++    // narrow grab handle when hidden.
++    void revealPanel();
++
+ signals:
+     void sig_pasteAsKeystrokes();
+     void sig_keyCombination(QKeyCombination key_secuence);
 diff --git a/source/client/desktop/desktop/desktop_window.cc b/source/client/desktop/desktop/desktop_window.cc
-index 5845fe3..06d6607 100644
+index 5845fe3..41e3aa8 100644
 --- a/source/client/desktop/desktop/desktop_window.cc
 +++ b/source/client/desktop/desktop/desktop_window.cc
-@@ -71,6 +71,9 @@ const quint32 kWheelMask =
+@@ -21,6 +21,7 @@
+ #include <QApplication>
+ #include <QBrush>
+ #include <QClipboard>
++#include <QCursor>
+ #include <QHBoxLayout>
+ #include <QPalette>
+ #include <QResizeEvent>
+@@ -71,6 +72,9 @@ const quint32 kWheelMask =
  // from high-polling-rate mice. Button and wheel events bypass coalescing and are sent immediately.
  const MilliSeconds kMouseFlushInterval{ 20 }; // 50Hz
  
-+// Custom build: height of the invisible strip along the top edge that reveals the session toolbar.
-+constexpr int kRevealStripHeight = 8;
++// Custom build: height of the invisible zone along the top edge that reveals the session toolbar.
++constexpr int kRevealZoneHeight = 8;
 +
  //--------------------------------------------------------------------------------------------------
  int toFramePosition(int position, int widget_size, int frame_size)
  {
-@@ -118,6 +121,13 @@ DesktopWindow::DesktopWindow(const proto::control::Config& desktop_config, QWidg
+@@ -118,6 +122,14 @@ DesktopWindow::DesktopWindow(const proto::control::Config& desktop_config, QWidg
      toolbar_ = new DesktopToolBar(scroll_area_);
      toolbar_->installEventFilter(this);
  
-+    // Custom build: the panel is revealed by moving the mouse to the top edge of the picture, so
-+    // the hit area is a full-width strip instead of the 55 px grab handle the panel itself shows.
-+    reveal_strip_ = new QWidget(scroll_area_);
-+    reveal_strip_->setMouseTracking(true);
-+    reveal_strip_->installEventFilter(this);
-+    reveal_strip_->raise();
++    // Custom build: the panel is revealed by moving the mouse to the top edge of the picture.
++    // The cursor position is polled instead of using a transparent hover strip: a strip has to
++    // be raised above the panel to work and then loses the mouse as soon as the panel opens,
++    // which is why the panel could only be opened once.
++    reveal_timer_ = new QTimer(this);
++    connect(reveal_timer_, &QTimer::timeout, this, &DesktopWindow::maybeRevealPanel);
++    reveal_timer_->start(MilliSeconds(150));
 +
      credential_panel_ = new CredentialPanel(this);
      connect(credential_panel_, &CredentialPanel::sig_credentialSelected,
              this, [this](qint64 credential_id, const QString& user_name, const SecureString& password)
-@@ -447,6 +457,10 @@ void DesktopWindow::resizeEvent(QResizeEvent* event)
+@@ -447,6 +459,7 @@ void DesktopWindow::resizeEvent(QResizeEvent* event)
          new_pos.setX(window_width - panel_width);
  
      toolbar_->move(new_pos);
 +
-+    if (reveal_strip_)
-+        reveal_strip_->setGeometry(0, 0, window_width, kRevealStripHeight);
-+
      onScaleDesktop();
  
      QWidget::resizeEvent(event);
-@@ -536,6 +550,13 @@ bool DesktopWindow::eventFilter(QObject* object, QEvent* event)
-             return true;
-         }
+@@ -491,6 +504,10 @@ bool DesktopWindow::eventFilter(QObject* object, QEvent* event)
+         if (event->type() == QEvent::DevicePixelRatioChange)
+             onScaleDesktop();
+ 
++        // Instant response; the poll timer is only a fallback for a cursor that does not move.
++        if (event->type() == QEvent::MouseMove)
++            maybeRevealPanel();
++
+         if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease)
+         {
+             QKeyEvent* key_event = static_cast<QKeyEvent*>(event);
+@@ -1059,9 +1076,11 @@ void DesktopWindow::onMouseEvent(const proto::input::MouseEvent& event)
      }
-+    else if (object == reveal_strip_)
-+    {
-+        // Custom build: touching anywhere along the top edge of the picture reveals the panel.
-+        if (event->type() == QEvent::Enter && toolbar_->isPanelHidden())
-+            QApplication::postEvent(toolbar_, new QEvent(QEvent::Enter));
-+        return false;
-+    }
-     else if (object == toolbar_)
+ 
+     // In MacOS event Leave does not always come to the widget when the mouse leaves its area.
++    // The check uses the panel's own coordinates: `pos` belongs to the picture and comparing it
++    // with the panel's rect hid the panel while the mouse was still on it.
+     if (!toolbar_->isPanelHidden() && !toolbar_->isPanelPinned())
      {
-         if (event->type() == QEvent::Resize)
-@@ -1293,6 +1314,14 @@ void DesktopWindow::onPasteKeystrokes()
+-        if (!toolbar_->rect().contains(pos))
++        if (!toolbar_->rect().contains(toolbar_->mapFromGlobal(QCursor::pos())))
+             QApplication::postEvent(toolbar_, new QEvent(QEvent::Leave));
+     }
+ }
+@@ -1290,6 +1309,34 @@ void DesktopWindow::onPasteKeystrokes()
+     }
+ }
+ 
++//--------------------------------------------------------------------------------------------------
++void DesktopWindow::maybeRevealPanel()
++{
++    // Custom build: the session toolbar is reachable by touching the top edge of the picture.
++    // The cursor position is checked instead of a hover event of some helper widget, so the
++    // panel can be opened again and again instead of only once.
++    bool in_zone = false;
++
++    if (isVisible())
++    {
++        QWidget* viewport = scroll_area_->viewport();
++
++        if (viewport->isVisible())
++        {
++            const QPoint pos = viewport->mapFromGlobal(QCursor::pos());
++            in_zone = pos.x() >= 0 && pos.x() < viewport->width() &&
++                pos.y() >= 0 && pos.y() < kRevealZoneHeight;
++        }
++    }
++
++    // Only the moment the cursor enters the zone opens the panel. Without the transition check a
++    // panel that closes while the cursor stays in the zone would immediately open again.
++    if (in_zone && !reveal_zone_active_ && toolbar_->isPanelHidden())
++        toolbar_->revealPanel();
++
++    reveal_zone_active_ = in_zone;
++}
++
  //--------------------------------------------------------------------------------------------------
  void DesktopWindow::onShowHidePanel()
  {
-+    // Custom build: while the panel is open the reveal strip must not sit on top of it.
-+    if (reveal_strip_)
-+    {
-+        reveal_strip_->setVisible(toolbar_->isPanelHidden());
-+        if (reveal_strip_->isVisible())
-+            reveal_strip_->raise();
-+    }
-+
-     QSize start_panel_size = toolbar_->size();
-     QSize end_panel_size = toolbar_->sizeHint();
- 
 diff --git a/source/client/desktop/desktop/desktop_window.h b/source/client/desktop/desktop/desktop_window.h
-index 92e087d..a999994 100644
+index 92e087d..a061c4c 100644
 --- a/source/client/desktop/desktop/desktop_window.h
 +++ b/source/client/desktop/desktop/desktop_window.h
-@@ -160,6 +160,11 @@ private:
+@@ -140,6 +140,10 @@ private slots:
+     void onPasteKeystrokes();
+     void onShowHidePanel();
+ 
++    // Custom build: opens the session toolbar when the mouse touches the top edge of the
++    // picture (Aspia's own grab handle is only 55 px wide).
++    void maybeRevealPanel();
++
+ private:
+     void sendConfig(const proto::control::Config& config);
+     void sendCapabilities();
+@@ -160,6 +164,7 @@ private:
      QHBoxLayout* layout_ = nullptr;
      QScrollArea* scroll_area_ = nullptr;
      DesktopToolBar* toolbar_ = nullptr;
 +
-+    // Custom build: invisible strip along the top edge of the remote picture that reveals the
-+    // session toolbar on hover (Aspia's own grab handle is only 55 px wide).
-+    QWidget* reveal_strip_ = nullptr;
-+
      DesktopWidget* desktop_ = nullptr;
      CredentialPanel* credential_panel_ = nullptr;
  
+@@ -175,6 +180,8 @@ private:
+ 
+     TimePoint start_time_;
+ 
++    QTimer* reveal_timer_ = nullptr;
++    bool reveal_zone_active_ = false;
+     QTimer* resize_timer_ = nullptr;
+     QSize screen_size_;
+     QTimer* scroll_timer_ = nullptr;
