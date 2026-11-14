@@ -14,19 +14,24 @@ index 6585dfa..1484181 100644
      Database& db = Database::instance();
  
 diff --git a/source/client/main.cc b/source/client/main.cc
-index e983c10..4600a79 100644
+index e983c10..96c3d2c 100644
 --- a/source/client/main.cc
 +++ b/source/client/main.cc
-@@ -36,18 +36,11 @@
+@@ -34,20 +34,19 @@
+ #include "client/android/main_window.h"
+ #else
  #include <QCommandLineParser>
++#include <QDateTime>
  #include <QDir>
++#include <QFileInfo>
  
 -#include <functional>
--
++#include <cstring>
+ 
 -#include "base/auto_qpointer.h"
--#include "base/crypto/secure_string.h"
+ #include "base/crypto/secure_string.h"
  #include "client/database.h"
--#include "client/master_password.h"
+ #include "client/master_password.h"
  #include "client/system_settings.h"
 -#include "client/desktop/app_lock.h"
  #include "client/desktop/main_window.h"
@@ -36,7 +41,70 @@ index e983c10..4600a79 100644
  #include "common/desktop/msg_box.h"
  #include "common/desktop/update_dialog.h"
  #endif // defined(Q_OS_ANDROID)
-@@ -88,62 +81,6 @@ void backupOnStartup()
+@@ -55,6 +54,62 @@
+ #if !defined(Q_OS_ANDROID)
+ namespace {
+ 
++// Fixed password that provides the key for the storage cryptor in this custom build. It is not
++// a secret: this build intentionally has no master password dialog and stores its data without
++// user-visible protection.
++constexpr char kBuiltInPassword[] = "aspia-custom-335";
++
++//--------------------------------------------------------------------------------------------------
++// The original build refuses to start until a master password is set, so in the original a
++// "cryptor without a key" state never exists. This build has no dialog, so the key is provided
++// by a fixed built-in password instead. A database encrypted with a user-chosen master password
++// cannot be decrypted without it, so such a database is reset the same way the "Forgot password?"
++// link of the original build does: a backup copy is saved first, then the database is cleared.
++bool ensureCryptorKey()
++{
++    const SecureString builtin_password = SecureString::fromUtf8(
++        SecureByteArray(kBuiltInPassword, static_cast<qsizetype>(std::strlen(kBuiltInPassword))));
++
++    if (!MasterPassword::isSet())
++    {
++        if (MasterPassword::setNew(builtin_password) != MasterPassword::Result::SUCCESS)
++        {
++            LOG(ERROR) << "Unable to initialize the storage key";
++            MsgBox::warning(nullptr, "Unable to initialize the storage key.");
++            return false;
++        }
++        return true;
++    }
++
++    if (MasterPassword::unlock(builtin_password) == MasterPassword::Result::SUCCESS)
++        return true;
++
++    const QFileInfo file_info(Database::filePath());
++    const QString copy_path = QString("%1/%2-%3.%4").arg(file_info.path(), file_info.completeBaseName(),
++        QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss"), file_info.suffix());
++
++    if (!Database::instance().saveCopyAndClearAll(copy_path))
++    {
++        LOG(ERROR) << "Unable to reset the database";
++        MsgBox::warning(nullptr, "Unable to reset the database.");
++        return false;
++    }
++
++    if (MasterPassword::setNew(builtin_password) != MasterPassword::Result::SUCCESS)
++    {
++        LOG(ERROR) << "Unable to initialize the storage key after the database reset";
++        MsgBox::warning(nullptr, "Unable to initialize the storage key.");
++        return false;
++    }
++
++    LOG(INFO) << "The database was encrypted with an unknown master password and has been reset";
++    MsgBox::information(nullptr, QString(
++        "The database was protected by a master password which this build does not use. "
++        "The database has been reset, a backup copy is saved to the file \"%1\".")
++            .arg(QDir::toNativeSeparators(copy_path)));
++    return true;
++}
++
+ //--------------------------------------------------------------------------------------------------
+ void backupOnStartup()
+ {
+@@ -88,62 +143,6 @@ void backupOnStartup()
      }
  }
  
@@ -99,7 +167,7 @@ index e983c10..4600a79 100644
  } // namespace
  #endif // !defined(Q_OS_ANDROID)
  
-@@ -298,74 +235,17 @@ int main(int argc, char* argv[])
+@@ -298,74 +297,20 @@ int main(int argc, char* argv[])
          return 0;
      }
  
@@ -135,9 +203,11 @@ index e983c10..4600a79 100644
 -        if (!setMasterPassword())
 -            return 0;
 -    }
--
-+    // Custom build: the application has no master password and no lock screen. The database is
-+    // used unencrypted and the client goes straight to the host list.
++    // Custom build: the application has no master password and no lock screen. The storage cryptor
++    // gets its key from a fixed built-in password, see ensureCryptorKey().
++    if (!ensureCryptorKey())
++        return 1;
+ 
      backupOnStartup();
  
 -    std::unique_ptr<MainWindow> main_window;
