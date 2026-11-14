@@ -6,7 +6,8 @@
 cloud-build\
   .github\workflows\build-client.yml              # 云端流水线（已修好，见下）
   patches\default_credentials.patch              # 默认凭据自动登录
-  patches\ui_tabs_hide_management.patch          # 第 1 批 UI：列表 tab 显隐 + tab 固定显示 IP
+  patches\ui_full_custom.patch                   # 完整 8 项 UI 定制（推荐，替代下面那个）
+  patches\ui_tabs_hide_management.patch          # 旧版第 1 批（仅 tab 显隐，已废弃）
   .gitattributes                                 # 强制 patch / yml 用 LF 签出
   一步一步操作指南.md                            # 从建仓库到拿 exe 的完整命令
 ```
@@ -57,9 +58,12 @@ cloud-build\
 3. 打开仓库的 **Actions** 页 → 左侧选 `build custom Aspia client (v3.3.5)` → 右侧 **Run workflow**。`patch_file` 输入框支持**逗号分隔多个补丁**，按填写顺序依次应用：
    - `none` —— 编**原版 3.3.5** 做基线测试，强烈建议第一次先跑这个验证 Qt 静态编译能过；
    - `default_credentials.patch` —— 默认凭据自动登录（默认值）；
-   - `ui_tabs_hide_management.patch` —— 第 1 批 UI 改动；
-   - `default_credentials.patch,ui_tabs_hide_management.patch` —— **两个都要**（已验证可叠加）；
+   - **`ui_full_custom.patch` —— 完整 8 项 UI 定制（推荐）**：去掉左侧分组树、连接后隐藏列表、工具栏右侧「+」按钮下拉已保存主机、点选即开新 tab、tab 用主机名作标题、关完所有连接恢复列表；
+   - `default_credentials.patch,ui_full_custom.patch` —— **两个都要**（已验证可叠加）；
+   - `ui_tabs_hide_management.patch` —— 早期第 1 批（只做 tab 显隐 + 一律显示 IP，**已废弃**，与 `ui_full_custom.patch` 冲突，勿同时使用）；
    - 你自己改的 UI：把 patch 放进 `patches\` 再填文件名即可。
+
+   > ⚠️ `ui_full_custom.patch` 与 `ui_tabs_hide_management.patch` 改同一批文件（`main_window.cc`），**不能同时填**。
 4. 等它跑完（首次几小时，见第 4 节）。页面底部 **Artifacts** 下载 `aspia-client-3.3.5-custom`，里面是 `aspia_client.exe`。
 5. exe 是静态链接单文件，单独拷到任意可写目录即可双击。若用了默认凭据补丁：首次手工输一次账号密码，同目录生成 `aspia_default_login.ini`，之后免输；`ACCESS_DENIED` 时会自动弹框重输并存新的。
 
