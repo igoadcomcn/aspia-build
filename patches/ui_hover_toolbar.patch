@@ -1,0 +1,293 @@
+diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
+index 70fdc16..ff638d0 100644
+--- a/source/client/desktop/main_window.cc
++++ b/source/client/desktop/main_window.cc
+@@ -18,11 +18,15 @@
+ 
+ #include "client/desktop/main_window.h"
+ 
++#include <QApplication>
++#include <QBoxLayout>
+ #include <QCloseEvent>
+ #include <QDesktopServices>
+ #include <QFont>
++#include <QFrame>
+ #include <QLineEdit>
+ #include <QMenu>
++#include <QMouseEvent>
+ #include <QScreen>
+ #include <QShortcut>
+ #include <QSignalBlocker>
+@@ -75,6 +79,11 @@ constexpr int kSearchFieldMarginPx = 5;
+ // Custom build: size of the "+" button that sits in the top-right corner of the tab bar.
+ constexpr int kAddButtonSizePx = 22;
+ 
++// Custom build: height of the invisible strip at the top of the tab content that reveals the
++// hover panel with quick action icons, and the maximum number of icons in that panel.
++constexpr int kQuickPanelHotZonePx = 5;
++constexpr int kQuickPanelMaxActions = 16;
++
+ // Custom build: localized UI strings of this file are written as UTF-16 escapes. MSVC assumes
+ // the ANSI code page for sources without a BOM, so plain Chinese text in a UTF-8 file would come
+ // out as mojibake on a build machine whose code page is not 65001.
+@@ -231,6 +240,17 @@ MainWindow::MainWindow(QWidget* parent)
+     ui->action_sessions_in_tabs->setChecked(true);
+     ui->action_sessions_in_tabs->setVisible(false);
+ 
++    // Custom build: no menu bar and no permanently visible toolbar in the main window - the
++    // remote view gets the whole window. The same actions are reachable from the hover panel
++    // that appears when the mouse touches the top edge of the tab content.
++    ui->menubar->setVisible(false);
++    ui->action_toolbar->setChecked(false);
++    ui->toolbar->setVisible(false);
++    ui->action_search_field->setChecked(false);
++
++    createQuickPanel();
++    qApp->installEventFilter(this);
++
+     const bool always_on_top = settings.alwaysOnTop();
+     ui->action_always_on_top->setChecked(always_on_top);
+     setWindowFlag(Qt::WindowStaysOnTopHint, always_on_top);
+@@ -650,6 +670,11 @@ void MainWindow::onCurrentTabChanged(int index)
+     installTabActions(active_tab_);
+     active_tab_->activate();
+     syncSearchField();
++
++    // Custom build: the hover panel mirrors the actions of the tab that is now active.
++    if (quick_panel_)
++        quick_panel_->hide();
++    rebuildQuickPanel(active_tab_);
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -672,6 +697,12 @@ void MainWindow::onCloseTab(int index)
+     ui->tabs->removeTab(index);
+     delete tab;
+ 
++    // Custom build: the actions of the closed tab are gone, so the hover panel must be rebuilt
++    // before it can be shown again.
++    if (quick_panel_)
++        quick_panel_->hide();
++    rebuildQuickPanel(active_tab_);
++
+     // Custom build: when the last session is gone, bring the host list back.
+     bool has_session = false;
+     for (int i = 0; i < ui->tabs->count(); ++i)
+@@ -1042,6 +1073,163 @@ void MainWindow::onLockRequested()
+     emit sig_lockRequested();
+ }
+ 
++//--------------------------------------------------------------------------------------------------
++void MainWindow::createQuickPanel()
++{
++    quick_panel_ = new QFrame(this);
++    quick_panel_->setFrameShape(QFrame::StyledPanel);
++    quick_panel_->setAutoFillBackground(true);
++    quick_panel_->setVisible(false);
++
++    quick_panel_layout_ = new QBoxLayout(QBoxLayout::LeftToRight, quick_panel_);
++    quick_panel_layout_->setContentsMargins(6, 4, 6, 4);
++    quick_panel_layout_->setSpacing(2);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::rebuildQuickPanel(Tab* tab)
++{
++    if (!quick_panel_layout_)
++        return;
++
++    while (QLayoutItem* item = quick_panel_layout_->takeAt(0))
++    {
++        delete item->widget();
++        delete item;
++    }
++
++    int action_count = 0;
++
++    auto add_action = [this, &action_count](QAction* action)
++    {
++        if (!action || !action->isVisible() || action_count >= kQuickPanelMaxActions)
++            return;
++        if (action->property(Tab::kMenuOnlyProperty).toBool())
++            return;
++
++        QToolButton* button = new QToolButton(quick_panel_);
++        button->setDefaultAction(action);
++        button->setAutoRaise(true);
++        button->setIconSize(QSize(20, 20));
++        button->setToolButtonStyle(
++            action->icon().isNull() ? Qt::ToolButtonTextOnly : Qt::ToolButtonIconOnly);
++        quick_panel_layout_->addWidget(button);
++
++        ++action_count;
++    };
++
++    auto add_separator = [this]()
++    {
++        if (quick_panel_layout_->count() == 0)
++            return;
++
++        QFrame* line = new QFrame(quick_panel_);
++        line->setFrameShape(QFrame::VLine);
++        line->setFrameShadow(QFrame::Sunken);
++        quick_panel_layout_->addWidget(line);
++    };
++
++    // The menu bar is hidden, so the global actions live only here (and in the tab context
++    // menus, which stay available).
++    add_action(ui->action_quick_connect);
++    add_action(ui->action_credentials);
++    add_action(ui->action_settings);
++
++    if (tab && tab->tabType() == Tab::Type::SESSION)
++    {
++        for (const Tab::ActionGroupEntry& group : tab->actionGroups())
++        {
++            bool group_used = false;
++
++            for (QAction* action : group.second)
++            {
++                const int before = action_count;
++
++                // Icon-only entries keep the panel compact; the rest stays in the menus.
++                if (action && action->icon().isNull())
++                    continue;
++
++                add_action(action);
++                if (action_count != before)
++                    group_used = true;
++            }
++
++            if (group_used)
++                add_separator();
++        }
++    }
++
++    add_separator();
++    add_action(ui->action_lock);
++    add_action(ui->action_exit);
++
++    quick_panel_->adjustSize();
++}
++
++//--------------------------------------------------------------------------------------------------
++QRect MainWindow::quickPanelHotZone() const
++{
++    QWidget* content = ui->tabs->currentWidget();
++    if (!content)
++        return QRect();
++
++    const QPoint top_left = content->mapToGlobal(QPoint(0, 0));
++    return QRect(top_left, QSize(content->width(), kQuickPanelHotZonePx));
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::updateQuickPanelGeometry()
++{
++    QWidget* content = ui->tabs->currentWidget();
++    if (!content || !quick_panel_)
++        return;
++
++    quick_panel_->adjustSize();
++
++    const QPoint content_top_left = content->mapTo(this, QPoint(0, 0));
++    const int centered_x =
++        content_top_left.x() + (content->width() - quick_panel_->width()) / 2;
++
++    quick_panel_->move(qMax(content_top_left.x(), centered_x), content_top_left.y() + 2);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::showQuickPanel()
++{
++    if (!quick_panel_ || quick_panel_->isVisible())
++        return;
++
++    updateQuickPanelGeometry();
++    quick_panel_->show();
++    quick_panel_->raise();
++}
++
++//--------------------------------------------------------------------------------------------------
++bool MainWindow::eventFilter(QObject* object, QEvent* event)
++{
++    const QEvent::Type type = event->type();
++
++    if (quick_panel_ && (type == QEvent::MouseMove || type == QEvent::MouseButtonPress))
++    {
++        const QPoint global_pos = static_cast<QMouseEvent*>(event)->globalPosition().toPoint();
++
++        if (type == QEvent::MouseMove && quickPanelHotZone().contains(global_pos))
++        {
++            showQuickPanel();
++        }
++        else if (quick_panel_->isVisible())
++        {
++            const QRect panel_rect(quick_panel_->mapToGlobal(QPoint(0, 0)),
++                                   quick_panel_->size());
++
++            if (!panel_rect.contains(global_pos))
++                quick_panel_->hide();
++        }
++    }
++
++    return QMainWindow::eventFilter(object, event);
++}
++
+ //--------------------------------------------------------------------------------------------------
+ void MainWindow::saveWindowState()
+ {
+@@ -1108,6 +1296,7 @@ void MainWindow::addTab(Tab* tab, const QString& title, const QIcon& icon)
+         {
+             removeTabActions();
+             installTabActions(tab);
++            rebuildQuickPanel(tab);
+         }
+     });
+ 
+diff --git a/source/client/desktop/main_window.h b/source/client/desktop/main_window.h
+index 1803e64..86ff2f0 100644
+--- a/source/client/desktop/main_window.h
++++ b/source/client/desktop/main_window.h
+@@ -42,6 +42,8 @@ class Tab;
+ class ManagementTab;
+ class SearchDialog;
+ class QLineEdit;
++class QBoxLayout;
++class QFrame;
+ class HostConfig;
+ 
+ class MainWindow final
+@@ -67,6 +69,9 @@ protected:
+     // QMainWindow implementation.
+     void closeEvent(QCloseEvent* event) final;
+ 
++    // QObject implementation.
++    bool eventFilter(QObject* object, QEvent* event) final;
++
+     // McpController::MainWindow implementation.
+     QList<McpController::ClientInfo> mcpClients() const final;
+     McpController::DesktopWindow* mcpDesktopWindow(qint64 client_id) const final;
+@@ -122,6 +127,13 @@ private:
+     void updateSeparatorVisibility();
+     QMenu* menuForActionGroup(Tab::ActionRole group) const;
+ 
++    // Custom build: the hover panel with quick action icons.
++    void createQuickPanel();
++    void rebuildQuickPanel(Tab* tab);
++    void updateQuickPanelGeometry();
++    void showQuickPanel();
++    QRect quickPanelHotZone() const;
++
+     std::unique_ptr<Ui::MainWindow> ui;
+ 
+     QLineEdit* search_field_ = nullptr;
+@@ -129,6 +141,8 @@ private:
+     SearchDialog* search_dialog_ = nullptr;
+     AppLock* app_lock_ = nullptr;
+     Tab* active_tab_ = nullptr;
++    QFrame* quick_panel_ = nullptr;
++    QBoxLayout* quick_panel_layout_ = nullptr;
+     QList<QPointer<QAction>> tab_toolbar_actions_;
+     QList<QPair<QMenu*, QList<QPointer<QAction>>>> tab_menu_actions_;
+ 
