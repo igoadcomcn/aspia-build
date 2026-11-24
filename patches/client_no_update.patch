@@ -1,0 +1,45 @@
+diff --git a/source/client/workers/update_worker.cc b/source/client/workers/update_worker.cc
+index bb0570d..18874e8 100644
+--- a/source/client/workers/update_worker.cc
++++ b/source/client/workers/update_worker.cc
+@@ -40,34 +40,12 @@ UpdateWorker::~UpdateWorker()
+ //--------------------------------------------------------------------------------------------------
+ void UpdateWorker::onPrepare()
+ {
+-    Database& db = Database::instance();
+-
+-    if (!db.isCheckUpdatesEnabled())
+-    {
+-        LOG(INFO) << "Update check is disabled";
+-        return;
+-    }
+-
+-    ProxyConfig proxy;
+-    if (db.proxyConfig(&proxy) != Database::ReadResult::OK)
+-    {
+-        LOG(ERROR) << "No readable proxy config, update check is skipped";
+-        return;
+-    }
+-
+-    SystemSettings settings;
+-    QByteArray public_key = settings.updatePublicKey();
+-
+-    update_checker_ = new UpdateChecker(db.updateChannel(), kClientUpdatePackage, this);
+-    update_checker_->setServer(settings.updateServer());
+-    update_checker_->setProxy(proxy.settings());
+-    if (!public_key.isEmpty())
+-        update_checker_->setPublicKeys({ public_key });
+-
+-    connect(update_checker_, &UpdateChecker::sig_checkFinished,
+-            this, &UpdateWorker::onUpdateCheckFinished);
+-    connect(update_checker_, &UpdateChecker::sig_checkFailed,
+-            this, &UpdateWorker::onUpdateCheckFailed);
++    // Custom build: the update check is disabled on purpose.
++    //
++    // The client never installs an update by itself (it only shows a notification),
++    // but the notification is suppressed as well so that this custom build is not
++    // silently replaced by an official release.
++    LOG(INFO) << "Update check is disabled in this build";
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
