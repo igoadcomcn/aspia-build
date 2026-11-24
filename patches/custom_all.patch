@@ -1,0 +1,1659 @@
+diff --git a/source/client/CMakeLists.txt b/source/client/CMakeLists.txt
+index 624fc2b..5c6ddef 100644
+--- a/source/client/CMakeLists.txt
++++ b/source/client/CMakeLists.txt
+@@ -35,6 +35,8 @@ list(APPEND SOURCE_CLIENT_CORE
+     config.h
+     credential_file.cc
+     credential_file.h
++    default_credentials.cc
++    default_credentials.h
+     file_error_code.cc
+     file_error_code.h
+     file_remove_queue_builder.cc
+diff --git a/source/client/default_credentials.cc b/source/client/default_credentials.cc
+new file mode 100644
+index 0000000..ee98d89
+--- /dev/null
++++ b/source/client/default_credentials.cc
+@@ -0,0 +1,117 @@
++//
++// Aspia Project
++// Copyright (C) 2016-2026 Dmitry Chapyshev <dmitry@aspia.ru>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program. If not, see <https://www.gnu.org/licenses/>.
++//
++
++#include "client/default_credentials.h"
++
++#include <QByteArray>
++#include <QCoreApplication>
++#include <QDir>
++#include <QSettings>
++
++#include "base/crypto/os_crypt.h"
++#include "base/logging.h"
++
++namespace {
++
++const QString kFileName = QStringLiteral("aspia_default_login.ini");
++const QString kEnabledParam = QStringLiteral("enabled");
++const QString kUserNameParam = QStringLiteral("user_name");
++const QString kPasswordParam = QStringLiteral("password");
++
++//--------------------------------------------------------------------------------------------------
++QString settingsPath()
++{
++    return QDir(QCoreApplication::applicationDirPath()).filePath(kFileName);
++}
++
++} // namespace
++
++//--------------------------------------------------------------------------------------------------
++std::optional<DefaultCredentials> loadDefaultCredentials()
++{
++    QSettings settings(settingsPath(), QSettings::IniFormat);
++
++    if (!settings.value(kEnabledParam, true).toBool())
++        return std::nullopt;
++
++    const QString username = settings.value(kUserNameParam).toString();
++    const QByteArray encrypted =
++        QByteArray::fromBase64(settings.value(kPasswordParam).toByteArray());
++
++    if (username.isEmpty() || encrypted.isEmpty())
++        return std::nullopt;
++
++    QByteArray plain;
++    if (!OSCrypt::decryptBytes(encrypted, &plain) || plain.isEmpty())
++    {
++        // DPAPI binds the value to the current Windows account. A copied green folder simply
++        // behaves as if no defaults were stored: the user is asked once and new ones are saved.
++        LOG(WARNING) << "Unable to decrypt default credentials (another Windows account?)";
++        return std::nullopt;
++    }
++
++    DefaultCredentials result;
++    result.username = username;
++    result.password = SecureString(QString::fromUtf8(plain));
++    plain.fill('\0');
++
++    if (result.password.isEmpty())
++        return std::nullopt;
++
++    return result;
++}
++
++//--------------------------------------------------------------------------------------------------
++bool saveDefaultCredentials(const QString& username, const SecureString& password)
++{
++    if (username.isEmpty() || password.isEmpty())
++        return false;
++
++    QByteArray encrypted;
++    const QByteArray plain = password.toString().toUtf8();
++
++    if (!OSCrypt::encryptBytes(plain, &encrypted) || encrypted.isEmpty())
++    {
++        LOG(ERROR) << "Unable to encrypt default credentials";
++        return false;
++    }
++
++    QSettings settings(settingsPath(), QSettings::IniFormat);
++    settings.setValue(kEnabledParam, true);
++    settings.setValue(kUserNameParam, username);
++    settings.setValue(kPasswordParam, encrypted.toBase64());
++    settings.sync();
++
++    if (settings.status() != QSettings::NoError)
++    {
++        LOG(ERROR) << "Unable to write" << settingsPath();
++        return false;
++    }
++
++    LOG(INFO) << "Default credentials saved to" << settingsPath();
++    return true;
++}
++
++//--------------------------------------------------------------------------------------------------
++void clearDefaultCredentials()
++{
++    QSettings settings(settingsPath(), QSettings::IniFormat);
++    settings.remove(kUserNameParam);
++    settings.remove(kPasswordParam);
++    settings.sync();
++}
+diff --git a/source/client/default_credentials.h b/source/client/default_credentials.h
+new file mode 100644
+index 0000000..515cbe3
+--- /dev/null
++++ b/source/client/default_credentials.h
+@@ -0,0 +1,49 @@
++//
++// Aspia Project
++// Copyright (C) 2016-2026 Dmitry Chapyshev <dmitry@aspia.ru>
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program. If not, see <https://www.gnu.org/licenses/>.
++//
++
++#ifndef CLIENT_DEFAULT_CREDENTIALS_H
++#define CLIENT_DEFAULT_CREDENTIALS_H
++
++#include <optional>
++
++#include <QString>
++
++#include "base/crypto/secure_string.h"
++
++// Global default credentials for a portable ("green") client build.
++// They are kept in "aspia_default_login.ini" next to aspia_client.exe, so the whole
++// folder can be moved to another machine without an installer.
++struct DefaultCredentials
++{
++    QString username;
++    SecureString password;
++};
++
++// Reads the default credentials. Returns std::nullopt when nothing is stored, when the
++// file has been disabled or when the password can not be decrypted (for example after
++// copying the folder to another Windows account).
++std::optional<DefaultCredentials> loadDefaultCredentials();
++
++// Writes (or replaces) the default credentials. The password is encrypted with the OS
++// keystore (DPAPI on Windows) before it goes to disk.
++bool saveDefaultCredentials(const QString& username, const SecureString& password);
++
++// Removes the stored user name and password but keeps the "enabled" switch untouched.
++void clearDefaultCredentials();
++
++#endif // CLIENT_DEFAULT_CREDENTIALS_H
+diff --git a/source/client/desktop/client_window.cc b/source/client/desktop/client_window.cc
+index 9eacf53..950caed 100644
+--- a/source/client/desktop/client_window.cc
++++ b/source/client/desktop/client_window.cc
+@@ -25,12 +25,15 @@
+ #include <QMoveEvent>
+ #include <QTimer>
+ 
++#include <optional>
++
+ #include "base/auto_qpointer.h"
+ #include "base/logging.h"
+ #include "base/version_constants.h"
+ #include "base/peer/host_id.h"
+ #include "base/threading/worker.h"
+ #include "client/database.h"
++#include "client/default_credentials.h"
+ #include "client/router_controller.h"
+ #include "client/session_keeper.h"
+ #include "client/desktop/authorization_dialog.h"
+@@ -123,6 +126,9 @@ bool ClientWindow::connectToHost(HostConfig host, const QString& display_name)
+     LOG(INFO) << "Connecting to host";
+     setClientTitle(host, session_type_);
+ 
++    default_credentials_used_ = false;
++    default_credentials_failed_ = false;
++
+     std::optional<std::pair<QString, SecureString>> credentials = storedCredentials(host);
+     if (credentials.has_value())
+     {
+@@ -131,11 +137,27 @@ bool ClientWindow::connectToHost(HostConfig host, const QString& display_name)
+         host.setPassword(credentials->second);
+     }
+ 
++    // Per-host credentials always win. For a quick connection there are none, so use the
++    // portable global defaults and skip the authorization dialog entirely.
++    if (!credentials.has_value() && (host.username().isEmpty() || host.password().isEmpty()))
++    {
++        if (std::optional<DefaultCredentials> defaults = loadDefaultCredentials())
++        {
++            LOG(INFO) << "Using default credentials from the portable config";
++            host.setUsername(defaults->username);
++            host.setPassword(defaults->password);
++            default_credentials_used_ = true;
++        }
++    }
++
+     if (host.username().isEmpty() || host.password().isEmpty())
+     {
+         LOG(INFO) << "Empty user name or password";
+ 
+-        if (!askCredentials(&host))
++        // The first manual login on a host that cannot store per-host credentials becomes the
++        // new portable default, so the next connection is authorized without a dialog.
++        const bool make_default = !credentials.has_value() && !canSaveCredentials(host);
++        if (!askCredentials(&host, make_default))
+             return false;
+     }
+ 
+@@ -456,6 +478,16 @@ void ClientWindow::saveHostCredentials(const HostConfig& host, qint64 credential
+ //--------------------------------------------------------------------------------------------------
+ void ClientWindow::forgetRefusedCredentials()
+ {
++    // The host refused the portable defaults: forget them and let askCredentialsAgain() show
++    // the authorization dialog. Whatever the user enters there becomes the new default.
++    if (default_credentials_used_)
++    {
++        LOG(INFO) << "Access denied with default credentials. Removing the portable defaults";
++        clearDefaultCredentials();
++        default_credentials_used_ = false;
++        default_credentials_failed_ = true;
++    }
++
+     if (!credentials_saved_)
+         return;
+ 
+@@ -500,7 +532,7 @@ void ClientWindow::setClientTitle(const HostConfig& host, proto::peer::SessionTy
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+-bool ClientWindow::askCredentials(HostConfig* host)
++bool ClientWindow::askCredentials(HostConfig* host, bool save_as_default)
+ {
+     const bool can_save_credentials = canSaveCredentials(*host);
+ 
+@@ -528,6 +560,13 @@ bool ClientWindow::askCredentials(HostConfig* host)
+     host->setUsername(auth_dialog->userName());
+     host->setPassword(auth_dialog->password());
+ 
++    // A one-time password carries no user name, so it must never become a global default.
++    if (save_as_default && !host->username().isEmpty() && !host->password().isEmpty() &&
++        !host->username().startsWith(u'#'))
++    {
++        saveDefaultCredentials(host->username(), host->password());
++    }
++
+     if (can_save_credentials && auth_dialog->isSaveCredentialsChecked() && !host->username().isEmpty())
+     {
+         saveHostCredentials(*host, auth_dialog->credentialId());
+@@ -542,6 +581,23 @@ void ClientWindow::askCredentialsAgain()
+ {
+     HostConfig host = session_state_->host();
+ 
++    // The refused portable defaults were already removed by forgetRefusedCredentials().
++    // Ask for a replacement pair, store it as the new default and reconnect immediately.
++    if (default_credentials_failed_)
++    {
++        default_credentials_failed_ = false;
++
++        if (host.username().startsWith(u'#'))
++            host.setUsername(QString());
++        host.setPassword(SecureString());
++
++        if (!askCredentials(&host, /* save_as_default */ true))
++            return;
++
++        startConnection(host, session_state_->displayName());
++        return;
++    }
++
+     // Stored credentials are changed in the host editor, not here.
+     if (storedCredentials(host).has_value())
+         return;
+diff --git a/source/client/desktop/client_window.h b/source/client/desktop/client_window.h
+index d225aa5..9ce75f4 100644
+--- a/source/client/desktop/client_window.h
++++ b/source/client/desktop/client_window.h
+@@ -159,7 +159,7 @@ private:
+     void saveHostCredentials(const HostConfig& host, qint64 credential_id);
+     void forgetRefusedCredentials();
+     void setClientTitle(const HostConfig& host, proto::peer::SessionType session_type);
+-    bool askCredentials(HostConfig* host);
++    bool askCredentials(HostConfig* host, bool save_as_default = false);
+     void askCredentialsAgain();
+     void startConnection(HostConfig host, const QString& display_name);
+     void fetchConnectionOffer();
+@@ -180,6 +180,11 @@ private:
+     QPointer<NetworkWorker> network_worker_;
+     SessionKeeper* session_keeper_ = nullptr;
+     bool credentials_saved_ = false;
++
++    // Portable default credentials support: whether the running session was authorized with
++    // the global defaults, and whether the host refused exactly those defaults.
++    bool default_credentials_used_ = false;
++    bool default_credentials_failed_ = false;
+ };
+ 
+ #endif // CLIENT_DESKTOP_CLIENT_WINDOW_H
+diff --git a/source/client/desktop/desktop/desktop_toolbar.cc b/source/client/desktop/desktop/desktop_toolbar.cc
+index 0609958..5fbf6e9 100644
+--- a/source/client/desktop/desktop/desktop_toolbar.cc
++++ b/source/client/desktop/desktop/desktop_toolbar.cc
+@@ -615,34 +615,22 @@ void DesktopToolBar::startRecording(bool enable)
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+-void DesktopToolBar::setTabbedMode(bool tabbed)
++void DesktopToolBar::setTabbedMode(bool /* tabbed */)
+ {
+-    LOG(INFO) << "setTabbedMode:" << tabbed;
+-
+-    if (is_tabbed_ == tabbed)
+-        return;
+-
+-    is_tabbed_ = tabbed;
++    // Custom build: the client window has no toolbar of its own any more, so the panel keeps the
++    // floating behaviour even when the session lives in a tab. In tabbed mode the original code
++    // hid the whole widget and disabled the hover logic (see isPanelHidden()/enterEvent()), which
++    // left a tabbed session with no toolbar at all.
++    if (hide_timer_->isActive())
++        hide_timer_->stop();
+ 
+-    if (tabbed)
+-    {
+-        if (hide_timer_->isActive())
+-            hide_timer_->stop();
++    const bool is_pinned = ui->action_pin->isChecked();
++    ui->toolbar->setVisible(is_pinned);
++    ui->frame->setVisible(!is_pinned);
++    show();
+ 
+-        hide();
+-    }
+-    else
+-    {
+-        // Restore the look the floating-mode constructor would have produced for the current
+-        // pin-state.
+-        bool is_pinned = ui->action_pin->isChecked();
+-        ui->toolbar->setVisible(is_pinned);
+-        ui->frame->setVisible(!is_pinned);
+-        show();
+-
+-        if (!is_pinned)
+-            hide_timer_->start(MilliSeconds(0));
+-    }
++    if (!is_pinned)
++        hide_timer_->start(MilliSeconds(0));
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -751,6 +739,27 @@ bool DesktopToolBar::isPanelPinned() const
+     return ui->action_pin->isChecked();
+ }
+ 
++//--------------------------------------------------------------------------------------------------
++void DesktopToolBar::revealPanel()
++{
++    // Custom build: the panel is opened by the desktop window as well (mouse on the top edge of the
++    // picture), so it must be re-openable an unlimited number of times. Every early return here made
++    // the panel appear exactly once, which is why the state is checked against the panel itself and
++    // not against temporary hover flags.
++    if (!ui->toolbar->isHidden())
++        return;
++
++    leaved_ = false;
++
++    if (hide_timer_->isActive())
++        hide_timer_->stop();
++
++    ui->toolbar->show();
++    ui->frame->hide();
++
++    emit sig_showHidePanel();
++}
++
+ //--------------------------------------------------------------------------------------------------
+ void DesktopToolBar::enterEvent(QEnterEvent* /* event */)
+ {
+@@ -763,15 +772,7 @@ void DesktopToolBar::enterEvent(QEnterEvent* /* event */)
+         hide_timer_->stop();
+ 
+     if (allow_hide_)
+-    {
+-        if (ui->toolbar->isHidden())
+-        {
+-            ui->toolbar->show();
+-            ui->frame->hide();
+-
+-            emit sig_showHidePanel();
+-        }
+-    }
++        revealPanel();
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+diff --git a/source/client/desktop/desktop/desktop_toolbar.h b/source/client/desktop/desktop/desktop_toolbar.h
+index 4d50ac0..6afcd4e 100644
+--- a/source/client/desktop/desktop/desktop_toolbar.h
++++ b/source/client/desktop/desktop/desktop_toolbar.h
+@@ -93,6 +93,11 @@ public:
+     bool isPanelHidden() const;
+     bool isPanelPinned() const;
+ 
++    // Custom build: opens the floating panel. Called by the desktop window when the mouse reaches
++    // the top edge of the picture, which makes the panel reachable even though it only shows a
++    // narrow grab handle when hidden.
++    void revealPanel();
++
+ signals:
+     void sig_pasteAsKeystrokes();
+     void sig_keyCombination(QKeyCombination key_secuence);
+diff --git a/source/client/desktop/desktop/desktop_window.cc b/source/client/desktop/desktop/desktop_window.cc
+index 5845fe3..41e3aa8 100644
+--- a/source/client/desktop/desktop/desktop_window.cc
++++ b/source/client/desktop/desktop/desktop_window.cc
+@@ -21,6 +21,7 @@
+ #include <QApplication>
+ #include <QBrush>
+ #include <QClipboard>
++#include <QCursor>
+ #include <QHBoxLayout>
+ #include <QPalette>
+ #include <QResizeEvent>
+@@ -71,6 +72,9 @@ const quint32 kWheelMask =
+ // from high-polling-rate mice. Button and wheel events bypass coalescing and are sent immediately.
+ const MilliSeconds kMouseFlushInterval{ 20 }; // 50Hz
+ 
++// Custom build: height of the invisible zone along the top edge that reveals the session toolbar.
++constexpr int kRevealZoneHeight = 8;
++
+ //--------------------------------------------------------------------------------------------------
+ int toFramePosition(int position, int widget_size, int frame_size)
+ {
+@@ -118,6 +122,14 @@ DesktopWindow::DesktopWindow(const proto::control::Config& desktop_config, QWidg
+     toolbar_ = new DesktopToolBar(scroll_area_);
+     toolbar_->installEventFilter(this);
+ 
++    // Custom build: the panel is revealed by moving the mouse to the top edge of the picture.
++    // The cursor position is polled instead of using a transparent hover strip: a strip has to
++    // be raised above the panel to work and then loses the mouse as soon as the panel opens,
++    // which is why the panel could only be opened once.
++    reveal_timer_ = new QTimer(this);
++    connect(reveal_timer_, &QTimer::timeout, this, &DesktopWindow::maybeRevealPanel);
++    reveal_timer_->start(MilliSeconds(150));
++
+     credential_panel_ = new CredentialPanel(this);
+     connect(credential_panel_, &CredentialPanel::sig_credentialSelected,
+             this, [this](qint64 credential_id, const QString& user_name, const SecureString& password)
+@@ -447,6 +459,7 @@ void DesktopWindow::resizeEvent(QResizeEvent* event)
+         new_pos.setX(window_width - panel_width);
+ 
+     toolbar_->move(new_pos);
++
+     onScaleDesktop();
+ 
+     QWidget::resizeEvent(event);
+@@ -491,6 +504,10 @@ bool DesktopWindow::eventFilter(QObject* object, QEvent* event)
+         if (event->type() == QEvent::DevicePixelRatioChange)
+             onScaleDesktop();
+ 
++        // Instant response; the poll timer is only a fallback for a cursor that does not move.
++        if (event->type() == QEvent::MouseMove)
++            maybeRevealPanel();
++
+         if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease)
+         {
+             QKeyEvent* key_event = static_cast<QKeyEvent*>(event);
+@@ -1059,9 +1076,11 @@ void DesktopWindow::onMouseEvent(const proto::input::MouseEvent& event)
+     }
+ 
+     // In MacOS event Leave does not always come to the widget when the mouse leaves its area.
++    // The check uses the panel's own coordinates: `pos` belongs to the picture and comparing it
++    // with the panel's rect hid the panel while the mouse was still on it.
+     if (!toolbar_->isPanelHidden() && !toolbar_->isPanelPinned())
+     {
+-        if (!toolbar_->rect().contains(pos))
++        if (!toolbar_->rect().contains(toolbar_->mapFromGlobal(QCursor::pos())))
+             QApplication::postEvent(toolbar_, new QEvent(QEvent::Leave));
+     }
+ }
+@@ -1290,6 +1309,34 @@ void DesktopWindow::onPasteKeystrokes()
+     }
+ }
+ 
++//--------------------------------------------------------------------------------------------------
++void DesktopWindow::maybeRevealPanel()
++{
++    // Custom build: the session toolbar is reachable by touching the top edge of the picture.
++    // The cursor position is checked instead of a hover event of some helper widget, so the
++    // panel can be opened again and again instead of only once.
++    bool in_zone = false;
++
++    if (isVisible())
++    {
++        QWidget* viewport = scroll_area_->viewport();
++
++        if (viewport->isVisible())
++        {
++            const QPoint pos = viewport->mapFromGlobal(QCursor::pos());
++            in_zone = pos.x() >= 0 && pos.x() < viewport->width() &&
++                pos.y() >= 0 && pos.y() < kRevealZoneHeight;
++        }
++    }
++
++    // Only the moment the cursor enters the zone opens the panel. Without the transition check a
++    // panel that closes while the cursor stays in the zone would immediately open again.
++    if (in_zone && !reveal_zone_active_ && toolbar_->isPanelHidden())
++        toolbar_->revealPanel();
++
++    reveal_zone_active_ = in_zone;
++}
++
+ //--------------------------------------------------------------------------------------------------
+ void DesktopWindow::onShowHidePanel()
+ {
+diff --git a/source/client/desktop/desktop/desktop_window.h b/source/client/desktop/desktop/desktop_window.h
+index 92e087d..a061c4c 100644
+--- a/source/client/desktop/desktop/desktop_window.h
++++ b/source/client/desktop/desktop/desktop_window.h
+@@ -140,6 +140,10 @@ private slots:
+     void onPasteKeystrokes();
+     void onShowHidePanel();
+ 
++    // Custom build: opens the session toolbar when the mouse touches the top edge of the
++    // picture (Aspia's own grab handle is only 55 px wide).
++    void maybeRevealPanel();
++
+ private:
+     void sendConfig(const proto::control::Config& config);
+     void sendCapabilities();
+@@ -160,6 +164,7 @@ private:
+     QHBoxLayout* layout_ = nullptr;
+     QScrollArea* scroll_area_ = nullptr;
+     DesktopToolBar* toolbar_ = nullptr;
++
+     DesktopWidget* desktop_ = nullptr;
+     CredentialPanel* credential_panel_ = nullptr;
+ 
+@@ -175,6 +180,8 @@ private:
+ 
+     TimePoint start_time_;
+ 
++    QTimer* reveal_timer_ = nullptr;
++    bool reveal_zone_active_ = false;
+     QTimer* resize_timer_ = nullptr;
+     QSize screen_size_;
+     QTimer* scroll_timer_ = nullptr;
+diff --git a/source/client/desktop/main_window.cc b/source/client/desktop/main_window.cc
+index cc38a9e..206bbc4 100644
+--- a/source/client/desktop/main_window.cc
++++ b/source/client/desktop/main_window.cc
+@@ -18,27 +18,44 @@
+ 
+ #include "client/desktop/main_window.h"
+ 
++#include <QAbstractButton>
++#include <QApplication>
++#include <QBoxLayout>
+ #include <QCloseEvent>
+ #include <QDesktopServices>
++#include <QFont>
++#include <QLabel>
+ #include <QLineEdit>
++#include <QMenu>
++#include <QMouseEvent>
++#include <QPointF>
+ #include <QScreen>
+ #include <QShortcut>
+ #include <QSignalBlocker>
+ #include <QStyle>
+ #include <QTabBar>
++#include <QTimer>
+ #include <QToolButton>
+ #include <QUrl>
+ #include <QWindow>
+ 
++#if defined(Q_OS_WIN)
++#  ifndef NOMINMAX
++#    define NOMINMAX
++#  endif
++#  include <windows.h>
++#  include <windowsx.h>
++#endif
++
+ #include "base/auto_qpointer.h"
+ #include "base/gui_application.h"
+ #include "base/logging.h"
+ #include "base/peer/host_id.h"
+ #include "base/update/update_info.h"
++#include "client/config.h"
+ #include "client/database.h"
+ #include "client/settings.h"
+ #include "client/system_settings.h"
+-#include "client/desktop/app_lock.h"
+ #include "client/desktop/authorization_dialog.h"
+ #include "client/desktop/client_tab.h"
+ #include "client/desktop/credentials_tab.h"
+@@ -69,6 +86,23 @@ namespace {
+ // The search field is the last thing on the toolbar and ends up against its edge.
+ constexpr int kSearchFieldMarginPx = 5;
+ 
++// Custom build: size of the "+" button that sits in the top-right corner of the tab bar.
++constexpr int kAddButtonSizePx = 22;
++
++// Custom build: size of the window buttons that live in the same corner (the window is frameless,
++// its caption is part of the tab strip) and width of the invisible resize border.
++constexpr int kWindowButtonWidthPx = 36;
++constexpr int kWindowButtonHeightPx = 22;
++constexpr int kResizeBorderPx = 6;
++
++// Custom build: localized UI strings of this file are written as UTF-16 escapes. MSVC assumes
++// the ANSI code page for sources without a BOM, so plain Chinese text in a UTF-8 file would come
++// out as mojibake on a build machine whose code page is not 65001.
++QString uiString(const char16_t* text)
++{
++    return QString::fromUtf16(text);
++}
++
+ //--------------------------------------------------------------------------------------------------
+ QString escapeTabTitle(const QString& title)
+ {
+@@ -129,6 +163,76 @@ MainWindow::MainWindow(QWidget* parent)
+     margin->setFixedWidth(kSearchFieldMarginPx);
+     ui->toolbar->addWidget(margin);
+ 
++    // Custom build: a "+" button at the far right of the tab bar (corner widget). It drops down
++    // the list of saved hosts; clicking an entry opens a new session tab. A corner widget is used
++    // instead of a toolbar action because the toolbar is repopulated for every active tab.
++    QToolButton* add_button = new QToolButton(this);
++    add_button->setText(QStringLiteral("+"));
++    add_button->setToolTip(uiString(u"\u65B0\u5EFA\u8FDE\u63A5\uFF1A\u9009\u62E9\u5BA2\u6237\u7AEF\u540E\u6253\u5F00\u65B0\u7684\u4F1A\u8BDD\u6807\u7B7E\u9875"));
++    add_button->setAutoRaise(true);
++    add_button->setPopupMode(QToolButton::InstantPopup);
++    add_button->setToolButtonStyle(Qt::ToolButtonTextOnly);
++    add_button->setCursor(Qt::PointingHandCursor);
++    add_button->setFixedSize(kAddButtonSizePx, kAddButtonSizePx);
++    {
++        QFont font = add_button->font();
++        font.setPointSize(font.pointSize() + 2);
++        font.setBold(true);
++        add_button->setFont(font);
++    }
++
++    QMenu* hosts_menu = new QMenu(add_button);
++    add_button->setMenu(hosts_menu);
++    createWindowCaption(add_button);
++
++    connect(hosts_menu, &QMenu::aboutToShow, this, [this, hosts_menu]()
++    {
++        hosts_menu->clear();
++
++        QList<LocalHostConfig> hosts;
++        if (Database::instance().allLocalHosts(&hosts) == Database::ReadResult::FAILED)
++        {
++            hosts_menu->addAction(uiString(u"\u65E0\u6CD5\u8BFB\u53D6\u5BA2\u6237\u7AEF\u5217\u8868"))->setEnabled(false);
++            return;
++        }
++
++        if (hosts.isEmpty())
++        {
++            hosts_menu->addAction(uiString(u"\u8FD8\u6CA1\u6709\u5BA2\u6237\u7AEF\uFF0C\u8BF7\u5148\u5728\u201C\u7BA1\u7406\u201D\u4E2D\u6DFB\u52A0"))->setEnabled(false);
++        }
++        else
++        {
++            for (const LocalHostConfig& saved_host : hosts)
++            {
++                const QString label = saved_host.name().isEmpty()
++                    ? saved_host.address()
++                    : QStringLiteral("%1  (%2)").arg(saved_host.name(), saved_host.address());
++
++                QAction* action = hosts_menu->addAction(label);
++                const HostConfig host = HostConfig::forLocalHost(saved_host);
++
++                connect(action, &QAction::triggered, this, [this, host]()
++                {
++                    onConnect(host, proto::peer::SESSION_TYPE_DESKTOP);
++                });
++            }
++        }
++
++        hosts_menu->addSeparator();
++        hosts_menu->addAction(uiString(u"\u7BA1\u7406\u5BA2\u6237\u7AEF\u2026"), this, [this]()
++        {
++            if (ManagementTab* management_tab = managementTab())
++            {
++                const int index = ui->tabs->indexOf(management_tab);
++                if (index != -1)
++                {
++                    ui->tabs->tabBar()->setTabVisible(index, true);
++                    ui->tabs->setCurrentIndex(index);
++                }
++            }
++        });
++    });
++
+     bool search_field_enabled = settings.isSearchFieldEnabled();
+     ui->action_search_field->setChecked(search_field_enabled);
+     search_action_->setVisible(search_field_enabled);
+@@ -142,7 +246,23 @@ MainWindow::MainWindow(QWidget* parent)
+     ui->toolbar->setIconSize(large_icons ? QSize(32, 32) : QSize(24, 24));
+     ui->action_large_icons->setChecked(large_icons);
+ 
+-    ui->action_sessions_in_tabs->setChecked(settings.openSessionsInTabs());
++    // Custom build: sessions are always tabbed, so the option has no effect anymore. Keep it
++    // checked (saveWindowState() writes it back) but take it out of the View menu.
++    ui->action_sessions_in_tabs->setChecked(true);
++    ui->action_sessions_in_tabs->setVisible(false);
++
++    // Custom build: application locking is not used, so the command is taken out of the menus
++    // (it is also not connected to anything anymore).
++    ui->action_lock->setVisible(false);
++    ui->action_lock->setShortcut(QKeySequence());
++
++    // Custom build: the menu bar and the main toolbar belong to the host list only. As soon as a
++    // remote session has focus they are hidden (see updateMainChrome()), so the session picture
++    // fills the window and the session's own floating toolbar is used to operate it.
++    ui->action_toolbar->setChecked(true);
++    ui->action_search_field->setChecked(true);
++    search_action_->setVisible(true);
++    ui->menubar->setVisible(false);
+ 
+     const bool always_on_top = settings.alwaysOnTop();
+     ui->action_always_on_top->setChecked(always_on_top);
+@@ -155,7 +275,6 @@ MainWindow::MainWindow(QWidget* parent)
+     connect(ui->action_mcp_connector, &QAction::toggled, this, &MainWindow::onMcpConnector);
+     connect(ui->action_help, &QAction::triggered, this, &MainWindow::onHelp);
+     connect(ui->action_about, &QAction::triggered, this, &MainWindow::onAbout);
+-    connect(ui->action_lock, &QAction::triggered, this, &MainWindow::onLock);
+     connect(ui->action_exit, &QAction::triggered, this, &MainWindow::close);
+     connect(ui->toolbar, &QToolBar::visibilityChanged, ui->action_toolbar, &QAction::setChecked);
+     connect(ui->action_toolbar, &QAction::toggled, ui->toolbar, &QToolBar::setVisible);
+@@ -230,12 +349,18 @@ MainWindow::MainWindow(QWidget* parent)
+     ui->menu_session_type->menuAction()->setVisible(false);
+     ui->menu_action->menuAction()->setVisible(false);
+ 
+-    // Create default tabs.
+-    addTab(new ManagementTab(this), tr("Management"), QIcon(":/img/cms.svg"));
++    // Create default tabs. The host list has no menu bar any more, so it carries the global
++    // commands in a context menu instead.
++    ManagementTab* management_tab = new ManagementTab(this);
++    management_tab->setContextMenuPolicy(Qt::CustomContextMenu);
++    connect(management_tab, &QWidget::customContextMenuRequested, this,
++            [this, management_tab](const QPoint& pos)
++    {
++        onGlobalContextMenu(management_tab->mapToGlobal(pos));
++    });
++    addTab(management_tab, tr("Management"), QIcon(":/img/cms.svg"));
+ 
+-    app_lock_ = new AppLock(this);
+-    connect(app_lock_, &AppLock::sig_lockRequested, this, &MainWindow::onLockRequested);
+-    app_lock_->setTimeout(Database::instance().lockTimeout());
++    updateMainChrome();
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -481,11 +606,6 @@ void MainWindow::onSettings()
+ 
+     SettingsTab* settings_tab = new SettingsTab(this);
+ 
+-    connect(settings_tab, &SettingsTab::sig_lockTimeoutChanged, this, [this]()
+-    {
+-        app_lock_->setTimeout(Database::instance().lockTimeout());
+-    });
+-
+     connect(settings_tab, &SettingsTab::sig_desktopConfigChanged, this, [this]()
+     {
+         for (int i = 0; i < ui->tabs->count(); ++i)
+@@ -502,26 +622,6 @@ void MainWindow::onSettings()
+     addTab(settings_tab, tr("Settings"), QIcon(":/img/settings.svg"));
+ }
+ 
+-//--------------------------------------------------------------------------------------------------
+-void MainWindow::onLock()
+-{
+-    LOG(INFO) << "[ACTION] Lock clicked";
+-
+-    if (hasSessions())
+-    {
+-        MsgBox::information(this, tr("Close all sessions to lock the application."));
+-        return;
+-    }
+-
+-    if (AppLock::hasOpenDialogs())
+-    {
+-        MsgBox::information(this, tr("Close all dialogs to lock the application."));
+-        return;
+-    }
+-
+-    onLockRequested();
+-}
+-
+ //--------------------------------------------------------------------------------------------------
+ void MainWindow::onHelp()
+ {
+@@ -557,12 +657,12 @@ void MainWindow::onCurrentTabChanged(int index)
+     const bool is_session = tab->tabType() == Tab::Type::SESSION;
+     ui->action_help->setShortcut(is_session ? QKeySequence() : QKeySequence(Qt::Key_F1));
+     ui->action_quick_connect->setShortcut(is_session ? QKeySequence() : QKeySequence(Qt::Key_F8));
+-    ui->action_lock->setShortcut(is_session ? QKeySequence() : QKeySequence(Qt::CTRL | Qt::Key_L));
+ 
+     active_tab_ = tab;
+     installTabActions(active_tab_);
+     active_tab_->activate();
+     syncSearchField();
++    updateMainChrome();
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -584,6 +684,31 @@ void MainWindow::onCloseTab(int index)
+ 
+     ui->tabs->removeTab(index);
+     delete tab;
++
++    // Custom build: when the last session is gone, bring the host list back.
++    bool has_session = false;
++    for (int i = 0; i < ui->tabs->count(); ++i)
++    {
++        Tab* remaining = tabAt(i);
++        if (remaining && remaining->tabType() == Tab::Type::SESSION)
++        {
++            has_session = true;
++            break;
++        }
++    }
++
++    if (!has_session)
++    {
++        if (ManagementTab* management_tab = managementTab())
++        {
++            const int management_index = ui->tabs->indexOf(management_tab);
++            if (management_index != -1)
++            {
++                ui->tabs->tabBar()->setTabVisible(management_index, true);
++                ui->tabs->setCurrentIndex(management_index);
++            }
++        }
++    }
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -636,12 +761,10 @@ void MainWindow::onConnect(const HostConfig& host, proto::peer::SessionType sess
+         return;
+     }
+ 
+-    // For sessions launched from another session (e.g. file transfer started from a desktop
+-    // session), inherit the tabbed/detached mode of the parent tab. Otherwise (ManagementTab or
+-    // direct call) fall back to the global "open sessions in tabs" setting.
+-    Tab* parent_tab = qobject_cast<Tab*>(sender());
+-    bool detached = (parent_tab && parent_tab->tabType() == Tab::Type::SESSION) ?
+-        parent_tab->isDetached() : !ui->action_sessions_in_tabs->isChecked();
++    // Custom build: sessions always open as tabs inside the main window. Dragging a tab out of
++    // the bar still detaches it into a separate window, so nothing is lost by ignoring the
++    // "open sessions in tabs" option here.
++    const bool detached = false;
+ 
+     ClientWindow* client_window = nullptr;
+ 
+@@ -695,7 +818,17 @@ void MainWindow::onConnect(const HostConfig& host, proto::peer::SessionType sess
+         return;
+ 
+     QString display_name = Database::instance().displayName();
+-    QString computer_name = host.name().isEmpty() ? host.address() : host.name();
++
++    // Custom build: the tab shows "name (address) / session type", so several sessions to the
++    // same computer (desktop / terminal / file transfer) stay tellable apart in the tab bar.
++    QString host_label = host.address();
++    if (!host.name().isEmpty() && host.name() != host.address())
++        host_label = QStringLiteral("%1 (%2)").arg(host.name(), host.address());
++
++    const QString type_label = sessionName(session_type);
++    QString tab_title = type_label.isEmpty() ?
++        host_label : uiString(u"%1 \u00B7 %2").arg(host_label, type_label);
++
+     QIcon icon = sessionIcon(session_type);
+ 
+     client_window->setWindowIcon(icon);
+@@ -714,13 +847,22 @@ void MainWindow::onConnect(const HostConfig& host, proto::peer::SessionType sess
+     // The tab is created immediately; the connection progress is displayed by the status overlay
+     // inside the session window.
+     ClientTab* client_tab = new ClientTab(client_window);
+-    addTab(client_tab, computer_name, icon);
++    addTab(client_tab, tab_title, icon);
+ 
+     if (detached)
+     {
+         int index = ui->tabs->indexOf(client_tab);
+         ui->tabs->tabBar()->setTabVisible(index, false);
+         client_tab->detachToWindow();
++
++        // Custom build: in detached mode the session lives in its own window, so the host list
++        // must stay visible in the main window.
++        if (ManagementTab* management_tab = managementTab())
++        {
++            const int management_index = ui->tabs->indexOf(management_tab);
++            if (management_index != -1)
++                ui->tabs->tabBar()->setTabVisible(management_index, true);
++        }
+     }
+ }
+ 
+@@ -904,15 +1046,6 @@ void MainWindow::onMcpClientsChanged(const QStringList& clients)
+     setWindowTitle(tr("%1 - AI is connected").arg(window_title_));
+ }
+ 
+-//--------------------------------------------------------------------------------------------------
+-void MainWindow::onLockRequested()
+-{
+-    LOG(INFO) << "Lock requested";
+-
+-    saveWindowState();
+-    emit sig_lockRequested();
+-}
+-
+ //--------------------------------------------------------------------------------------------------
+ void MainWindow::saveWindowState()
+ {
+@@ -983,6 +1116,18 @@ void MainWindow::addTab(Tab* tab, const QString& title, const QIcon& icon)
+     });
+ 
+     ui->tabs->setCurrentIndex(index);
++
++    // Custom build: as soon as a session exists, hide the host list so the remote desktop gets
++    // the whole window. It comes back in onCloseTab() when the last session is closed.
++    if (tab->tabType() == Tab::Type::SESSION)
++    {
++        if (ManagementTab* management_tab = managementTab())
++        {
++            const int management_index = ui->tabs->indexOf(management_tab);
++            if (management_index != -1)
++                ui->tabs->tabBar()->setTabVisible(management_index, false);
++        }
++    }
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+@@ -1122,6 +1267,305 @@ void MainWindow::syncSearchField()
+     }
+ }
+ 
++//--------------------------------------------------------------------------------------------------
++void MainWindow::updateMainChrome()
++{
++    // Custom build: no menu bar while a session is in front - the picture gets the whole window.
++    // A desktop session brings its own floating toolbar (revealed at the top edge), so the window
++    // toolbar goes away as well. Terminal / file transfer / system info have no toolbar of their
++    // own, so they keep the window toolbar - otherwise they would be left without any actions.
++    const bool is_session = active_tab_ && active_tab_->tabType() == Tab::Type::SESSION;
++
++    bool has_own_toolbar = false;
++    if (is_session)
++    {
++        if (ClientTab* client_tab = dynamic_cast<ClientTab*>(active_tab_))
++        {
++            ClientWindow* window = client_tab->clientWindow();
++            has_own_toolbar = window && window->sessionType() == proto::peer::SESSION_TYPE_DESKTOP;
++        }
++    }
++
++    ui->menubar->setVisible(false);
++    ui->toolbar->setVisible(!has_own_toolbar);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::createWindowCaption(QToolButton* add_button)
++{
++    // Custom build: the window is frameless. Its caption - the application name and the three
++    // window buttons - lives in the top-right corner of the tab strip, so the client looks like one
++    // continuous tab bar and a maximized window is all tabs and picture.
++    setWindowFlag(Qt::FramelessWindowHint, true);
++
++    caption_widget_ = new QWidget(ui->tabs);
++    caption_widget_->setObjectName(QStringLiteral("captionWidget"));
++
++    // Custom build: the caption is dragged with startSystemMove() instead of the native
++    // HTCAPTION hit test. The hit test made the whole caption row swallow its clicks as soon as
++    // the window was restored from the maximized state, which left the window buttons dead.
++    caption_widget_->installEventFilter(this);
++    ui->tabs->tabBar()->installEventFilter(this);
++
++    QBoxLayout* caption_layout = new QBoxLayout(QBoxLayout::LeftToRight, caption_widget_);
++    caption_layout->setContentsMargins(8, 2, 0, 2);
++    caption_layout->setSpacing(2);
++
++    caption_label_ = new QLabel(windowTitle(), caption_widget_);
++    caption_label_->setObjectName(QStringLiteral("captionLabel"));
++    caption_label_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
++    {
++        QFont font = caption_label_->font();
++        font.setBold(true);
++        caption_label_->setFont(font);
++    }
++    caption_layout->addWidget(caption_label_);
++    caption_layout->addSpacing(6);
++
++    auto add_window_button = [this, caption_layout](const QString& text, const QString& tooltip)
++    {
++        QToolButton* button = new QToolButton(caption_widget_);
++        button->setText(text);
++        button->setToolTip(tooltip);
++        button->setAutoRaise(true);
++        button->setFocusPolicy(Qt::NoFocus);
++        button->setFixedSize(kWindowButtonWidthPx, kWindowButtonHeightPx);
++        caption_layout->addWidget(button);
++        return button;
++    };
++
++    QToolButton* minimize_button = add_window_button(uiString(u"\u2013"), tr("Minimize"));
++    connect(minimize_button, &QToolButton::clicked, this, [this]() { showMinimized(); });
++
++    maximize_button_ = add_window_button(uiString(u"\u25A1"), tr("Maximize"));
++    connect(maximize_button_, &QToolButton::clicked, this, &MainWindow::onMaximizeClicked);
++
++    QToolButton* close_button = add_window_button(uiString(u"\u2715"), tr("Close"));
++    close_button->setObjectName(QStringLiteral("closeWindowButton"));
++    connect(close_button, &QToolButton::clicked, this, &MainWindow::close);
++
++    QWidget* corner = new QWidget(ui->tabs);
++    corner->setObjectName(QStringLiteral("cornerWidget"));
++
++    QBoxLayout* corner_layout = new QBoxLayout(QBoxLayout::LeftToRight, corner);
++    corner_layout->setContentsMargins(0, 0, 2, 0);
++    corner_layout->setSpacing(2);
++    corner_layout->addWidget(add_button);
++    corner_layout->addSpacing(6);
++    corner_layout->addWidget(caption_widget_);
++
++    ui->tabs->setCornerWidget(corner, Qt::TopRightCorner);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::onMaximizeClicked()
++{
++    // The state is changed from a queued call: doing it inside the click handler of the button
++    // (while the click still holds the mouse) disrupts the mouse capture on Windows and the
++    // window buttons stop reacting.
++    QTimer::singleShot(0, this, [this]()
++    {
++        if (isMaximized())
++            showNormal();
++        else
++            showMaximized();
++    });
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::startWindowDrag()
++{
++    // The window is frameless, so the caption drag is started explicitly. Returning HTCAPTION
++    // from the native hit test would make the caption swallow every click, including the ones
++    // that belong to the window buttons.
++    if (isFullScreen())
++        return;
++
++    if (QWindow* handle = windowHandle())
++        handle->startSystemMove();
++}
++
++//--------------------------------------------------------------------------------------------------
++bool MainWindow::eventFilter(QObject* object, QEvent* event)
++{
++    if (object != caption_widget_ && object != ui->tabs->tabBar())
++        return QMainWindow::eventFilter(object, event);
++
++    const QEvent::Type type = event->type();
++    if (type != QEvent::MouseButtonPress && type != QEvent::MouseButtonDblClick)
++        return QMainWindow::eventFilter(object, event);
++
++    QMouseEvent* mouse_event = static_cast<QMouseEvent*>(event);
++    if (mouse_event->button() != Qt::LeftButton)
++        return QMainWindow::eventFilter(object, event);
++
++    // Presses on a tab stay with the tab bar (selection, detaching, drag & drop).
++    if (object == ui->tabs->tabBar() &&
++        ui->tabs->tabBar()->tabAt(mouse_event->position().toPoint()) != -1)
++    {
++        return QMainWindow::eventFilter(object, event);
++    }
++
++    if (type == QEvent::MouseButtonDblClick)
++    {
++        onMaximizeClicked();
++        return true;
++    }
++
++    startWindowDrag();
++    return true;
++}
++//--------------------------------------------------------------------------------------------------
++bool MainWindow::nativeEvent(const QByteArray& event_type, void* message, qintptr* result)
++{
++#if defined(Q_OS_WIN)
++    if (event_type == QByteArrayLiteral("windows_generic_MSG") && message)
++    {
++        MSG* msg = static_cast<MSG*>(message);
++
++        // A frameless window would be maximized over the taskbar, so the limit is clamped to the
++        // work area of the current monitor.
++        if (msg->message == WM_GETMINMAXINFO)
++        {
++            HMONITOR monitor = MonitorFromWindow(reinterpret_cast<HWND>(winId()),
++                                                 MONITOR_DEFAULTTONEAREST);
++            MONITORINFO monitor_info = {};
++            monitor_info.cbSize = sizeof(monitor_info);
++
++            if (GetMonitorInfo(monitor, &monitor_info))
++            {
++                MINMAXINFO* min_max_info = reinterpret_cast<MINMAXINFO*>(msg->lParam);
++                min_max_info->ptMaxPosition.x = monitor_info.rcWork.left - monitor_info.rcMonitor.left;
++                min_max_info->ptMaxPosition.y = monitor_info.rcWork.top - monitor_info.rcMonitor.top;
++                min_max_info->ptMaxSize.x = monitor_info.rcWork.right - monitor_info.rcWork.left;
++                min_max_info->ptMaxSize.y = monitor_info.rcWork.bottom - monitor_info.rcWork.top;
++                return true;
++            }
++        }
++
++        if (msg->message == WM_NCHITTEST)
++        {
++            // A Win32 hit test message carries physical screen pixels, while mapFromGlobal()
++            // expects device-independent pixels. Without this division a display scaled to 200%
++            // made every point past the middle of a restored window look like the right resize
++            // border, so the window buttons and the toolbar stopped receiving clicks (a maximized
++            // window skipped the branch and kept working).
++            const qreal dpr = windowHandle() ? windowHandle()->devicePixelRatio() : 1.0;
++
++            const QPoint global_pos(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
++            const QPoint pos = mapFromGlobal((QPointF(global_pos) / dpr).toPoint());
++            const QRect client_rect = rect();
++
++            // The window buttons sit right at the top edge; the resize border must not steal
++            // their clicks.
++            const QWidget* corner = ui->tabs->cornerWidget(Qt::TopRightCorner);
++            const bool over_corner = corner && corner->isVisible() &&
++                corner->rect().contains(corner->mapFrom(this, pos));
++
++            // A frameless window has no native border, so the resize edges are hit-tested here.
++            if (!isMaximized() && !isFullScreen() && !over_corner)
++            {
++                const bool on_left = pos.x() < kResizeBorderPx;
++                const bool on_right = pos.x() >= client_rect.width() - kResizeBorderPx;
++                const bool on_top = pos.y() < kResizeBorderPx;
++                const bool on_bottom = pos.y() >= client_rect.height() - kResizeBorderPx;
++
++                if (on_left || on_right || on_top || on_bottom)
++                {
++                    if (on_top && on_left)
++                        *result = HTTOPLEFT;
++                    else if (on_top && on_right)
++                        *result = HTTOPRIGHT;
++                    else if (on_bottom && on_left)
++                        *result = HTBOTTOMLEFT;
++                    else if (on_bottom && on_right)
++                        *result = HTBOTTOMRIGHT;
++                    else if (on_left)
++                        *result = HTLEFT;
++                    else if (on_right)
++                        *result = HTRIGHT;
++                    else if (on_top)
++                        *result = HTTOP;
++                    else
++                        *result = HTBOTTOM;
++                    return true;
++                }
++            }
++
++        }
++    }
++#endif
++    return QMainWindow::nativeEvent(event_type, message, result);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::changeEvent(QEvent* event)
++{
++    if (event->type() == QEvent::WindowTitleChange && caption_label_)
++        caption_label_->setText(windowTitle());
++
++    if (event->type() == QEvent::WindowStateChange && maximize_button_)
++    {
++        maximize_button_->setText(isMaximized() ? uiString(u"\u2750") : uiString(u"\u25A1"));
++        maximize_button_->setToolTip(isMaximized() ? tr("Restore") : tr("Maximize"));
++    }
++
++    QMainWindow::changeEvent(event);
++}
++
++//--------------------------------------------------------------------------------------------------
++void MainWindow::onGlobalContextMenu(const QPoint& global_pos)
++{
++    // Custom build: the menu bar is gone, so the host list exposes the same commands through a
++    // context menu. The actions themselves are shared with the (hidden) menus, so their state,
++    // shortcuts and signals keep working.
++    QMenu menu(this);
++
++    for (QAction* top_action : ui->menubar->actions())
++    {
++        QMenu* source = top_action->menu();
++        if (!source || !top_action->isVisible())
++            continue;
++
++        QList<QAction*> entries;
++        for (QAction* action : source->actions())
++        {
++            if (action->isSeparator() || !action->isVisible())
++                continue;
++            entries.append(action);
++        }
++
++        if (entries.isEmpty())
++            continue;
++
++        if (!menu.isEmpty())
++            menu.addSeparator();
++
++        menu.addSection(top_action->text());
++
++        for (QAction* action : entries)
++        {
++            if (QMenu* submenu = action->menu())
++            {
++                QMenu* copy = menu.addMenu(action->text());
++                for (QAction* item : submenu->actions())
++                {
++                    if (item->isSeparator() || !item->isVisible())
++                        continue;
++                    copy->addAction(item);
++                }
++            }
++            else
++            {
++                menu.addAction(action);
++            }
++        }
++    }
++
++    if (!menu.isEmpty())
++        menu.exec(global_pos);
++}
++
+ //--------------------------------------------------------------------------------------------------
+ void MainWindow::installTabActions(Tab* tab)
+ {
+diff --git a/source/client/desktop/main_window.h b/source/client/desktop/main_window.h
+index 1803e64..7f93882 100644
+--- a/source/client/desktop/main_window.h
++++ b/source/client/desktop/main_window.h
+@@ -36,12 +36,13 @@ namespace proto::peer {
+ enum SessionType : int;
+ } // namespace proto::peer
+ 
+-class AppLock;
+ class ClientWindow;
+ class Tab;
+ class ManagementTab;
+ class SearchDialog;
+ class QLineEdit;
++class QLabel;
++class QToolButton;
+ class HostConfig;
+ 
+ class MainWindow final
+@@ -59,13 +60,17 @@ public:
+ public slots:
+     void showAndActivate();
+ 
+-signals:
+-    // The state of the window is saved by then, and the window is expected to be destroyed.
+-    void sig_lockRequested();
+-
+ protected:
+     // QMainWindow implementation.
+     void closeEvent(QCloseEvent* event) final;
++    void changeEvent(QEvent* event) final;
++
++    // QObject implementation. Used to drag the window from its caption.
++    bool eventFilter(QObject* object, QEvent* event) final;
++
++    // QWidget implementation. The window is frameless, so the native hit test provides the resize
++    // edges; the caption is dragged separately (see eventFilter()).
++    bool nativeEvent(const QByteArray& event_type, void* message, qintptr* result) final;
+ 
+     // McpController::MainWindow implementation.
+     QList<McpController::ClientInfo> mcpClients() const final;
+@@ -86,7 +91,6 @@ private slots:
+     void onQuickConnect();
+     void onCredentials();
+     void onSettings();
+-    void onLock();
+     void onHelp();
+     void onAbout();
+     void onCurrentTabChanged(int index);
+@@ -103,7 +107,6 @@ private slots:
+     void onAlwaysOnTop(bool checked);
+     void onMcpConnector(bool enable);
+     void onMcpClientsChanged(const QStringList& clients);
+-    void onLockRequested();
+ 
+ private:
+     void saveWindowState();
+@@ -122,13 +125,27 @@ private:
+     void updateSeparatorVisibility();
+     QMenu* menuForActionGroup(Tab::ActionRole group) const;
+ 
++    // Custom build: shows the menu bar / main toolbar only while the host list has focus.
++    void updateMainChrome();
++
++    // Custom build: frameless window whose caption (application name + window buttons) sits in the
++    // top-right corner of the tab strip.
++    void createWindowCaption(QToolButton* add_button);
++    void onMaximizeClicked();
++    void startWindowDrag();
++
++    // Custom build: the menus of the host list moved into a context menu.
++    void onGlobalContextMenu(const QPoint& global_pos);
++
+     std::unique_ptr<Ui::MainWindow> ui;
+ 
+     QLineEdit* search_field_ = nullptr;
+     QAction* search_action_ = nullptr;
+     SearchDialog* search_dialog_ = nullptr;
+-    AppLock* app_lock_ = nullptr;
+     Tab* active_tab_ = nullptr;
++    QWidget* caption_widget_ = nullptr;
++    QLabel* caption_label_ = nullptr;
++    QToolButton* maximize_button_ = nullptr;
+     QList<QPointer<QAction>> tab_toolbar_actions_;
+     QList<QPair<QMenu*, QList<QPointer<QAction>>>> tab_menu_actions_;
+ 
+diff --git a/source/client/desktop/management/local_group_widget.cc b/source/client/desktop/management/local_group_widget.cc
+index 37412b6..2d9782d 100644
+--- a/source/client/desktop/management/local_group_widget.cc
++++ b/source/client/desktop/management/local_group_widget.cc
+@@ -145,7 +145,14 @@ QList<LocalHostConfig> LocalGroupWidget::selectedHosts() const
+ void LocalGroupWidget::showGroup(qint64 group_id)
+ {
+     QList<LocalHostConfig> hosts;
+-    const Database::ReadResult result = Database::instance().localHostList(group_id, &hosts);
++    Database::ReadResult result;
++
++    // Custom build: the group tree is hidden, so group_id <= 0 means "all saved hosts".
++    // This also keeps search, drag-drop and reload working after the sidebar is hidden.
++    if (group_id <= 0)
++        result = Database::instance().allLocalHosts(&hosts);
++    else
++        result = Database::instance().localHostList(group_id, &hosts);
+ 
+     if (result != Database::ReadResult::FAILED || group_id != current_group_id_)
+     {
+diff --git a/source/client/desktop/management_tab.cc b/source/client/desktop/management_tab.cc
+index d87e09f..f43ea70 100644
+--- a/source/client/desktop/management_tab.cc
++++ b/source/client/desktop/management_tab.cc
+@@ -322,7 +322,12 @@ ManagementTab::ManagementTab(QWidget* parent)
+     });
+ 
+     local_group_widget_->setOnlineCheckEnabled(ui->action_online_check->isChecked());
+-    local_group_widget_->showGroup(ui->sidebar->currentGroupId());
++
++    // Custom build: the group tree is not needed. The widget object stays alive (20+ places in
++    // this file reference ui->sidebar), it is just hidden, and the list shows every saved host
++    // in one flat list instead of one group at a time.
++    ui->sidebar->hide();
++    local_group_widget_->showGroup(-1);
+     switchContent(local_group_widget_);
+     updateActionsState();
+ 
+diff --git a/source/client/desktop/settings_tab.cc b/source/client/desktop/settings_tab.cc
+index 6585dfa..1484181 100644
+--- a/source/client/desktop/settings_tab.cc
++++ b/source/client/desktop/settings_tab.cc
+@@ -113,6 +113,10 @@ SettingsTab::SettingsTab(QWidget* parent)
+     LOG(INFO) << "Ctor";
+     ui->setupUi(this);
+ 
++    // Custom build: the application has no master password and never locks itself, so the whole
++    // security section (lock timeout, automatic unlock, master password) is not shown.
++    ui->groupbox_security->hide();
++
+     Settings settings;
+     Database& db = Database::instance();
+ 
+diff --git a/source/client/main.cc b/source/client/main.cc
+index e983c10..96c3d2c 100644
+--- a/source/client/main.cc
++++ b/source/client/main.cc
+@@ -34,20 +34,19 @@
+ #include "client/android/main_window.h"
+ #else
+ #include <QCommandLineParser>
++#include <QDateTime>
+ #include <QDir>
++#include <QFileInfo>
+ 
+-#include <functional>
++#include <cstring>
+ 
+-#include "base/auto_qpointer.h"
+ #include "base/crypto/secure_string.h"
+ #include "client/database.h"
+ #include "client/master_password.h"
+ #include "client/system_settings.h"
+-#include "client/desktop/app_lock.h"
+ #include "client/desktop/main_window.h"
+ #include "client/desktop/update_server_dialog.h"
+ #include "client/mcp/mcp_worker.h"
+-#include "common/desktop/credentials_dialog.h"
+ #include "common/desktop/msg_box.h"
+ #include "common/desktop/update_dialog.h"
+ #endif // defined(Q_OS_ANDROID)
+@@ -55,6 +54,62 @@
+ #if !defined(Q_OS_ANDROID)
+ namespace {
+ 
++// Fixed password that provides the key for the storage cryptor in this custom build. It is not
++// a secret: this build intentionally has no master password dialog and stores its data without
++// user-visible protection.
++constexpr char kBuiltInPassword[] = "aspia-custom-335";
++
++//--------------------------------------------------------------------------------------------------
++// The original build refuses to start until a master password is set, so in the original a
++// "cryptor without a key" state never exists. This build has no dialog, so the key is provided
++// by a fixed built-in password instead. A database encrypted with a user-chosen master password
++// cannot be decrypted without it, so such a database is reset the same way the "Forgot password?"
++// link of the original build does: a backup copy is saved first, then the database is cleared.
++bool ensureCryptorKey()
++{
++    const SecureString builtin_password = SecureString::fromUtf8(
++        SecureByteArray(kBuiltInPassword, static_cast<qsizetype>(std::strlen(kBuiltInPassword))));
++
++    if (!MasterPassword::isSet())
++    {
++        if (MasterPassword::setNew(builtin_password) != MasterPassword::Result::SUCCESS)
++        {
++            LOG(ERROR) << "Unable to initialize the storage key";
++            MsgBox::warning(nullptr, "Unable to initialize the storage key.");
++            return false;
++        }
++        return true;
++    }
++
++    if (MasterPassword::unlock(builtin_password) == MasterPassword::Result::SUCCESS)
++        return true;
++
++    const QFileInfo file_info(Database::filePath());
++    const QString copy_path = QString("%1/%2-%3.%4").arg(file_info.path(), file_info.completeBaseName(),
++        QDateTime::currentDateTime().toString("yyyyMMdd-hhmmss"), file_info.suffix());
++
++    if (!Database::instance().saveCopyAndClearAll(copy_path))
++    {
++        LOG(ERROR) << "Unable to reset the database";
++        MsgBox::warning(nullptr, "Unable to reset the database.");
++        return false;
++    }
++
++    if (MasterPassword::setNew(builtin_password) != MasterPassword::Result::SUCCESS)
++    {
++        LOG(ERROR) << "Unable to initialize the storage key after the database reset";
++        MsgBox::warning(nullptr, "Unable to initialize the storage key.");
++        return false;
++    }
++
++    LOG(INFO) << "The database was encrypted with an unknown master password and has been reset";
++    MsgBox::information(nullptr, QString(
++        "The database was protected by a master password which this build does not use. "
++        "The database has been reset, a backup copy is saved to the file \"%1\".")
++            .arg(QDir::toNativeSeparators(copy_path)));
++    return true;
++}
++
+ //--------------------------------------------------------------------------------------------------
+ void backupOnStartup()
+ {
+@@ -88,62 +143,6 @@ void backupOnStartup()
+     }
+ }
+ 
+-//--------------------------------------------------------------------------------------------------
+-bool setMasterPassword()
+-{
+-    AutoQPointer<CredentialsDialog> dialog(
+-        new CredentialsDialog(CredentialsDialog::Type::SET_PASSWORD, nullptr));
+-    dialog->setWindowTitle(QApplication::translate("Client", "Set Master Password"));
+-    dialog->setHeaderIcon(":/img/lock.svg");
+-    dialog->setHeaderText(QApplication::translate(
+-        "Client", "Set a master password required to unlock the application."));
+-    dialog->setValidator([](CredentialsDialog* d) -> bool
+-    {
+-        SecureString new_password = d->password();
+-
+-        if (new_password.size() < MasterPassword::kMinPasswordLength)
+-        {
+-            MsgBox::warning(d, QApplication::translate(
+-                "Client", "The password can not be shorter than %n characters.",
+-                "", MasterPassword::kMinPasswordLength));
+-            return false;
+-        }
+-
+-        if (!MasterPassword::isSafePassword(new_password))
+-        {
+-            QString unsafe = QApplication::translate(
+-                "Client", "Password you entered does not meet the security requirements!");
+-            QString safe = QApplication::translate("Client",
+-                "The password must contain lowercase and uppercase characters, "
+-                "numbers and should not be shorter than %n characters.",
+-                "", MasterPassword::kSafePasswordLength);
+-            QString question = QApplication::translate(
+-                "Client", "Do you want to enter a different password?");
+-
+-            if (MsgBox::warning(d, QString("<b>%1</b><br/>%2<br/>%3").arg(unsafe, safe, question),
+-                                MsgBox::Yes | MsgBox::No) == MsgBox::Yes)
+-                return false;
+-        }
+-
+-        if (MasterPassword::setNew(new_password) != MasterPassword::Result::SUCCESS)
+-        {
+-            MsgBox::warning(d, QApplication::translate("Client", "Unable to set master password."));
+-            return false;
+-        }
+-
+-        return true;
+-    });
+-
+-    if (dialog->exec() != QDialog::Accepted)
+-    {
+-        LOG(INFO) << "Master password set cancelled by user";
+-        return false;
+-    }
+-
+-    LOG(INFO) << "Master password set";
+-    return true;
+-}
+-
+ } // namespace
+ #endif // !defined(Q_OS_ANDROID)
+ 
+@@ -298,74 +297,20 @@ int main(int argc, char* argv[])
+         return 0;
+     }
+ 
+-    if (MasterPassword::autoUnlock())
+-    {
+-        LOG(INFO) << "Unlocked automatically";
+-    }
+-    else if (MasterPassword::isSet())
+-    {
+-        LOG(INFO) << "Master password is set, prompting user";
+-
+-        switch (AppLock::unlock(true))
+-        {
+-            case AppLock::Result::UNLOCKED:
+-                break;
+-
+-            case AppLock::Result::RESET:
+-                if (!setMasterPassword())
+-                    return 0;
+-                break;
+-
+-            case AppLock::Result::CANCELLED:
+-                return 0;
+-
+-            case AppLock::Result::FAILED:
+-                return 1;
+-        }
+-    }
+-    else
+-    {
+-        LOG(INFO) << "Master password is not set, prompting user to set one";
+-
+-        if (!setMasterPassword())
+-            return 0;
+-    }
++    // Custom build: the application has no master password and no lock screen. The storage cryptor
++    // gets its key from a fixed built-in password, see ensureCryptorKey().
++    if (!ensureCryptorKey())
++        return 1;
+ 
+     backupOnStartup();
+ 
+-    std::unique_ptr<MainWindow> main_window;
+-
+-    // The lock destroys the window with everything it shows, and the unlock creates a new one.
+-    std::function<void()> create_main_window = [&]()
+-    {
+-        main_window = std::make_unique<MainWindow>();
+-
+-        QObject::connect(&application, &Application::sig_windowActivated,
+-                         main_window.get(), &MainWindow::showAndActivate);
+-        QObject::connect(main_window.get(), &MainWindow::sig_lockRequested, &application, [&]()
+-        {
+-            // Until the new window there is no window on the screen, and closing the unlock dialog
+-            // would otherwise quit the application.
+-            const bool quit_on_last_window_closed = QApplication::quitOnLastWindowClosed();
+-            QApplication::setQuitOnLastWindowClosed(false);
++    MainWindow main_window;
+ 
+-            main_window.reset();
++    QObject::connect(&application, &Application::sig_windowActivated,
++                     &main_window, &MainWindow::showAndActivate);
+ 
+-            if (AppLock::unlock(false) != AppLock::Result::UNLOCKED)
+-            {
+-                QApplication::quit();
+-                return;
+-            }
+-
+-            create_main_window();
+-            QApplication::setQuitOnLastWindowClosed(quit_on_last_window_closed);
+-        }, Qt::QueuedConnection);
+-
+-        main_window->show();
+-        main_window->activateWindow();
+-    };
+-
+-    create_main_window();
++    main_window.show();
++    main_window.activateWindow();
+     return application.exec();
+ #endif // defined(Q_OS_ANDROID)
+ }
