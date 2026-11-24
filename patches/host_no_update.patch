@@ -1,0 +1,95 @@
+diff --git a/source/host/system_settings.cc b/source/host/system_settings.cc
+index 69053c5..8d947e8 100644
+--- a/source/host/system_settings.cc
++++ b/source/host/system_settings.cc
+@@ -31,7 +31,6 @@ const QString kPreferredVideoCapturer = "preferred_video_capturer";
+ const QString kWaylandRestoreToken = "wayland_restore_token";
+ 
+ const QString kUpdateChannel = "update/channel";
+-const QString kUpdateAutoUpdate = "update/auto_update";
+ const QString kUpdateCheckFrequency = "update/check_frequency";
+ const QString kUpdateServerAddress = "update/address";
+ const QString kUpdatePublicKey = "update/public_key";
+@@ -130,13 +129,16 @@ void SystemSettings::setApplicationShutdownDisabled(bool value)
+ //--------------------------------------------------------------------------------------------------
+ bool SystemSettings::isAutoUpdateEnabled() const
+ {
+-    return settings_.value(kUpdateAutoUpdate, true).toBool();
++    // Custom build: the automatic update mechanism is permanently disabled.
++    // See host/workers/update_worker.cc for the details.
++    return false;
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+-void SystemSettings::setAutoUpdateEnabled(bool enable)
++void SystemSettings::setAutoUpdateEnabled(bool /* enable */)
+ {
+-    settings_.setValue(kUpdateAutoUpdate, enable);
++    // Custom build: the automatic update mechanism is permanently disabled, so the
++    // request is ignored (it would otherwise be re-enabled by the config import).
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
+diff --git a/source/host/ui/config_dialog.cc b/source/host/ui/config_dialog.cc
+index 1152d36..09121e0 100644
+--- a/source/host/ui/config_dialog.cc
++++ b/source/host/ui/config_dialog.cc
+@@ -125,6 +125,11 @@ ConfigDialog::ConfigDialog(QWidget* parent)
+     LOG(INFO) << "Ctor";
+     ui->setupUi(this);
+ 
++    // Custom build: the update mechanism is disabled in this build, so the whole
++    // "Updates" section is hidden - the user cannot re-enable the automatic update
++    // or trigger a manual check that would install a newer version.
++    ui->groupbox_update_server->setVisible(false);
++
+     //---------------------------------------------------------------------------------------------
+     // General Tab
+     //---------------------------------------------------------------------------------------------
+diff --git a/source/host/workers/update_worker.cc b/source/host/workers/update_worker.cc
+index 21daedf..40273b1 100644
+--- a/source/host/workers/update_worker.cc
++++ b/source/host/workers/update_worker.cc
+@@ -69,34 +69,14 @@ UpdateWorker::~UpdateWorker()
+ //--------------------------------------------------------------------------------------------------
+ void UpdateWorker::onCheckUpdates()
+ {
+-    if (update_checker_ || update_downloader_ || update_installer_)
+-    {
+-        LOG(INFO) << "Update already in progress";
+-        return;
+-    }
+-
+-    HostStorage storage;
+-    storage.setLastUpdateCheck(std::time(nullptr));
+-    storage.setUpdateRetryTime(0);
+-    storage.setUpdateCheckResult(QString());
+-    storage.setUpdateInstallVersion(QString());
+-
+-    SystemSettings settings;
+-    QByteArray public_key = settings.updatePublicKey();
+-
+-    update_checker_ = new UpdateChecker(settings.updateChannel(), kHostUpdatePackage, this);
+-    update_checker_->setServer(settings.updateServer());
+-    update_checker_->setProxy(Database::instance().proxySettings());
+-    if (!public_key.isEmpty())
+-        update_checker_->setPublicKeys({ public_key });
+-
+-    connect(update_checker_, &UpdateChecker::sig_checkFinished,
+-            this, &UpdateWorker::onUpdateCheckFinished);
+-    connect(update_checker_, &UpdateChecker::sig_checkFailed,
+-            this, &UpdateWorker::onUpdateCheckFailed);
+-
+-    LOG(INFO) << "Start checking for updates";
+-    update_checker_->start();
++    // Custom build: the update mechanism is disabled on purpose.
++    //
++    // The original host silently downloads and installs a newer version on its own
++    // (UpdateInstaller::Mode::SERVICE restarts the service). That upgrades the host
++    // beyond the protocol version the client supports, and the client then refuses to
++    // connect with "the host version is newer than the client version". Keeping the
++    // host on a fixed version is the only way to keep this custom build usable.
++    LOG(INFO) << "Update check is disabled in this build";
+ }
+ 
+ //--------------------------------------------------------------------------------------------------
